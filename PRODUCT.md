@@ -25,7 +25,7 @@ Implementation approach delegated by Nitin after an explicit choice between a li
 - Scrypted’s GPU priority and existing llama-swap workload must remain respected.
 
 ## Identity and deployment
-Working product name SpeechDock, confirmed in the implementation proposal. Own public GitHub repository under nphil, as requested on 2026-10-31; branded icon; versioned container releases; proper Unraid template, Docker-tab icon/WebUI, update metadata, persistent app data, and internal HomeLabber hostname. Container-package visibility is independent; pulls, update checks and release notes must all work.
+Working product name SpeechDock, confirmed in the implementation proposal. Own public GitHub repository and public GHCR image under nphil, as requested on 2026-10-31; branded icon; versioned container releases; proper Unraid template, Docker-tab icon/WebUI, update metadata, persistent app data, and internal HomeLabber hostname. Image pulls, update checks and release notes must work without GitHub credentials.
 
 ## Brand commitments
 Inherit Nitin’s active Lucent v2 design language and Rosé Pine palette, with self-hosted Manrope and one token layer. The interface should be clean, modern, calm, and functional, not decorative. Operate mode: the work and its state lead, with concise copy and progressive settings.

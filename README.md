@@ -15,7 +15,7 @@ Whisper Turbo is the fast transcription default. **Turbo cannot translate.** Eng
 
 ## Unraid installation
 
-Use [`unraid/speechdock.xml`](unraid/speechdock.xml). The image is `ghcr.io/nphil/speechdock:latest`. The GitHub repository, release notes and template are public. The GHCR container package has separate visibility and currently requires authenticated pulls, so Unraid still needs working GHCR credentials that survive reboot. Making the repository public does not change the image permissions.
+Use [`unraid/speechdock.xml`](unraid/speechdock.xml). The image is `ghcr.io/nphil/speechdock:latest`. The repository, release notes, template and GHCR image are public; Unraid can pull the image and check for updates without GitHub credentials.
 
 | Container path | Host path | Access |
 | --- | --- | --- |
@@ -101,6 +101,6 @@ Model registration requires a compatible real validator. To include validator-ba
 
 CI checks the Python service and frontend without publishing. The manually dispatched **Release** workflow requires a stable `X.Y.Z` matching `pyproject.toml` and human-readable release notes. It checks the app, builds and smoke-tests the exact image, publishes the versioned GHCR image, creates the GitHub release/tag and moves `latest`. A push to `main` is not a release.
 
-Images carry source, version and revision labels. Unraid's update check must resolve both local and remote image versions; verify it after installation, along with ShipLog's access to private release notes and the app-served icon. Do not make a private package public to work around missing credentials.
+Images carry source, version and revision labels. Unraid's update check must resolve both local and remote image versions; verify it after installation, along with ShipLog's access to the public release notes and the app-served icon.
 
 If a release fails partway, inspect the image tags and GitHub release before retrying. A failed health check is not enough reason for automatic rollback. Capture container health, exit/restart state and logs first; rollback by pinning a known-good image digest in the Unraid template and recreating through its native update path.

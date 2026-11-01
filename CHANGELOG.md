@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Make the GitHub repository, release notes and Unraid template public. The GHCR container image retains separate access permissions.
+- Make the GitHub repository, release notes, Unraid template and GHCR image public. Verify anonymous access to both `latest` and `0.1.0`, so image pulls and update checks need no GitHub credentials.
 
 ## 0.1.0 — 2026-10-31
 
