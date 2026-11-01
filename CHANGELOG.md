@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3 — 2026-11-01
+
+- Accept valid subtitle cues when Whisper’s unused internal subword estimates overlap or run backward. Validate the actual cue endpoints, preserve every recognized segment and keep strict final subtitle and physical-audio timing checks.
+
 ## 0.1.2 — 2026-11-01
 
 - Use Whisper’s aligned word/token endpoints for subtitle cue boundaries instead of coarse predicted segment times. Fix full-length movie transcription stopping on an overlong segment without dropping dialogue or widening the physical-audio timing guard.

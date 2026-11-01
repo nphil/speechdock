@@ -78,7 +78,7 @@ SpeechDock implements the Whisper ASR protocol Bazarr uses: `GET /status`, `POST
 
 Speech work runs one job at a time with a bounded waiting queue. Uploads are spooled to disk, not retained as whole media files in memory. A checksum-pinned Silero VAD model detects speech on the CPU, one five-minute PCM block at a time. Only bounded voiced windows are sent to llama-swap; subtitles retain their original movie timeline, including long silent openings. Digital silence produces no subtitle cues; language detection reports when no speech is available. Whisper may still miss or misrecognize speech. Cancellation takes effect at safe processing boundaries, not necessarily in the middle of an engine request.
 
-Subtitle text is preserved from each recognized segment. Cue boundaries use Whisper’s finer word/token alignment rather than its coarse segment-time predictions. Malformed, overlapping, zero-duration and physically out-of-bounds cues remain errors.
+Subtitle text is preserved from each recognized segment. Cue boundaries use the first token’s onset and the last token’s end rather than Whisper’s coarse segment-time predictions. Intermediate token estimates can overlap or run backward and are not exposed as word intervals. Every finished cue must still have positive duration, remain non-overlapping and fit the physical audio.
 
 Defaults: 1 GiB upload limit, six-hour audio limit and 14-day retained history. Upload limits and retention are configurable. Failed/interrupted jobs remain visible with an explanation. Removing a job or expiring its history only removes SpeechDock's own records and files, never the original media library.
 

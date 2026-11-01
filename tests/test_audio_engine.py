@@ -248,7 +248,6 @@ def test_engine_keeps_zero_length_tokens_inside_positive_cue(monkeypatch):
     [{"start": 0, "end": "0.5"}],
     [{"start": False, "end": .5}],
     [{"start": .6, "end": .5}],
-    [{"start": 0, "end": .7}, {"start": .6, "end": .8}],
     [{"start": 0, "end": 1.04}],
 ])
 def test_engine_rejects_bad_alignment_instead_of_using_coarse_timing(monkeypatch, words):
@@ -278,3 +277,40 @@ def test_engine_keeps_empty_speech_response(monkeypatch):
     engine = Engine({"engine_url": "http://example.test"})
     monkeypatch.setattr(engine, "_request", response)
     assert asyncio.run(engine.transcribe(_wav(), "whisper-1", "en", "transcribe")) == ""
+
+
+def test_internal_reversed_alignment_does_not_invalidate_segment_cue(monkeypatch):
+    # Actual 329.880 s window: the And/Robert end estimates precede their
+    # onsets, but the two endpoints consumed by our segment cue are valid.
+    # This is not a claim that the backend's individual word intervals are valid.
+    text = " And Robert Michael Giles, field supervisor."
+    timing = [
+        (" And", 17.76, 16.01), (" Robert", 17.76, 17.0),
+        (" Michael", 17.76, 18.150000000000002),
+        (" G", 18.150000000000002, 18.31), ("iles", 18.31, 18.95),
+        (",", 18.96, 19.32), (" field", 19.32, 19.57),
+        (" supervisor", 19.580000000000002, 20.09), (".", 20.11, 20.26),
+    ]
+    async def response(*_args):
+        return httpx.Response(200, json={"segments": [{
+            "text": text, "start": 17.76, "end": 20.26,
+            "words": [{"word": word, "start": start, "end": end}
+                      for word, start, end in timing],
+        }]})
+    engine = Engine({"engine_url": "http://example.test"})
+    monkeypatch.setattr(engine, "_request", response)
+    result = asyncio.run(engine.transcribe(_wav(23.49), "whisper-1", "en", "transcribe"))
+    assert audio.parse_srt(result) == [audio.Cue(17760, 20260, text.strip())]
+
+
+def test_internal_subword_overlap_is_not_a_final_cue_overlap(monkeypatch):
+    async def response(*_args):
+        return httpx.Response(200, json={"segments": [{
+            "text": "coarticulated", "words": [
+                {"start": 0, "end": .7}, {"start": .6, "end": .8},
+            ],
+        }]})
+    engine = Engine({"engine_url": "http://example.test"})
+    monkeypatch.setattr(engine, "_request", response)
+    result = asyncio.run(engine.transcribe(_wav(), "whisper-1", "en", "transcribe"))
+    assert audio.parse_srt(result) == [audio.Cue(0, 800, "coarticulated")]

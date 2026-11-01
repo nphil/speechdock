@@ -7,7 +7,7 @@ RUN npm run build
 
 FROM ghcr.io/astral-sh/uv:0.9.30 AS uv
 FROM python:3.12-slim-bookworm AS runtime
-ARG VERSION=0.1.1
+ARG VERSION=0.1.3
 ARG REVISION=unknown
 ARG CREATED=unknown
 LABEL org.opencontainers.image.title="SpeechDock" \

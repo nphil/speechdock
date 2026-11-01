@@ -16,7 +16,7 @@ class EngineError(ValueError):
 
 
 def _aligned_cues(payload: dict) -> list[Cue]:
-    """Use acoustic token endpoints, not predicted segment timestamp tokens."""
+    """Use aligned cue endpoints; internal token intervals are not subtitles."""
     if not isinstance(payload, dict) or not isinstance(payload.get("segments"), list):
         raise ValueError("Invalid speech engine segments")
     cues = []
@@ -26,22 +26,16 @@ def _aligned_cues(payload: dict) -> list[Cue]:
         words = segment.get("words")
         if not isinstance(words, list) or not words:
             raise ValueError("Speech engine did not return aligned word timings")
-        previous_end = 0
-        for index, word in enumerate(words):
-            if not isinstance(word, dict):
-                raise ValueError("Invalid speech engine word timings")
-            times = (word.get("start"), word.get("end"))
-            if any(type(t) not in (int, float) or not math.isfinite(t) or t < 0 for t in times):
-                raise ValueError("Invalid speech engine word timings")
-            start, end = (round(t * 1000) for t in times)
-            # Punctuation and subword tokens can have zero duration. Keep their
-            # text in the segment, but require ordered, nonnegative alignment.
-            if start < previous_end or end < start:
-                raise ValueError("Invalid or overlapping speech engine word timings")
-            if index == 0:
-                first_start = start
-            previous_end = end
-        cues.append(Cue(first_start, previous_end, segment["text"].strip()))
+        if not isinstance(words[0], dict) or not isinstance(words[-1], dict):
+            raise ValueError("Invalid speech engine cue endpoints")
+        # whisper.cpp's internal subword alignment can overlap or reverse.
+        # We expose segment cues, not individual word intervals: consume only
+        # the first onset and final end, then validate the resulting cues.
+        times = (words[0].get("start"), words[-1].get("end"))
+        if any(type(t) not in (int, float) or not math.isfinite(t) or t < 0 for t in times):
+            raise ValueError("Invalid speech engine cue endpoints")
+        start, end = (round(t * 1000) for t in times)
+        cues.append(Cue(start, end, segment["text"].strip()))
     return cues
 
 
@@ -93,8 +87,8 @@ class Engine:
         response = await self._request(wav, model, fields)
         try:
             # Segment timestamps are model predictions and can extend past the
-            # WAV even with token_timestamps enabled. The words carry the actual
-            # alignment; retain every segment's text and use those endpoints.
+            # WAV even with token_timestamps enabled. Use aligned cue endpoints
+            # while retaining every segment's text.
             cues = _aligned_cues(response.json())
             with wave.open(io.BytesIO(wav), "rb") as source:
                 frames, rate = source.getnframes(), source.getframerate()
