@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 — 2026-11-01
+
+- Use Whisper’s aligned word/token endpoints for subtitle cue boundaries instead of coarse predicted segment times. Fix full-length movie transcription stopping on an overlong segment without dropping dialogue or widening the physical-audio timing guard.
+- Preserve complete segment text, including punctuation and zero-duration internal tokens, while rejecting malformed, overlapping or out-of-bounds alignment.
+- Document the exact shared SQLite file permissions required when llama-swap runs as root and SpeechDock runs as UID/GID 1000. Keep the database owner, contents and unrelated appdata permissions intact.
+
 ## 0.1.1 — 2026-11-01
 
 - Detect speech with a checksum-pinned CPU Silero model before sending bounded audio windows to Whisper. Preserve original movie timestamps and return empty subtitles for genuine silence rather than hallucinated speech.

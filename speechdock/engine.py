@@ -1,17 +1,48 @@
 """Client for the shared llama-swap / whisper-server instance."""
 
 import io
+import math
 import wave
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .audio import Cue, parse_srt, render
+from .audio import Cue, render
 from .languages import LANGUAGES, normalize_language
 
 
 class EngineError(ValueError):
     """An actionable engine connectivity or response error."""
+
+
+def _aligned_cues(payload: dict) -> list[Cue]:
+    """Use acoustic token endpoints, not predicted segment timestamp tokens."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("segments"), list):
+        raise ValueError("Invalid speech engine segments")
+    cues = []
+    for segment in payload["segments"]:
+        if not isinstance(segment, dict) or not isinstance(segment.get("text"), str):
+            raise ValueError("Invalid speech engine segment")
+        words = segment.get("words")
+        if not isinstance(words, list) or not words:
+            raise ValueError("Speech engine did not return aligned word timings")
+        previous_end = 0
+        for index, word in enumerate(words):
+            if not isinstance(word, dict):
+                raise ValueError("Invalid speech engine word timings")
+            times = (word.get("start"), word.get("end"))
+            if any(type(t) not in (int, float) or not math.isfinite(t) or t < 0 for t in times):
+                raise ValueError("Invalid speech engine word timings")
+            start, end = (round(t * 1000) for t in times)
+            # Punctuation and subword tokens can have zero duration. Keep their
+            # text in the segment, but require ordered, nonnegative alignment.
+            if start < previous_end or end < start:
+                raise ValueError("Invalid or overlapping speech engine word timings")
+            if index == 0:
+                first_start = start
+            previous_end = end
+        cues.append(Cue(first_start, previous_end, segment["text"].strip()))
+    return cues
 
 
 def _base_url(value: str) -> str:
@@ -56,12 +87,15 @@ class Engine:
     async def transcribe(self, wav: bytes, model: str, language: str, task: str) -> str:
         if task not in {"transcribe", "translate"}:
             raise EngineError("Unsupported speech task")
-        fields = {"language": normalize_language(language), "response_format": "srt", "no_timestamps": "false", "token_timestamps": "true", "max_len": "84", "split_on_word": "true"}
+        fields = {"language": normalize_language(language), "response_format": "verbose_json", "no_timestamps": "false", "token_timestamps": "true", "max_len": "84", "split_on_word": "true"}
         if task == "translate":
             fields["translate"] = "true"
         response = await self._request(wav, model, fields)
         try:
-            cues = parse_srt(response.text)
+            # Segment timestamps are model predictions and can extend past the
+            # WAV even with token_timestamps enabled. The words carry the actual
+            # alignment; retain every segment's text and use those endpoints.
+            cues = _aligned_cues(response.json())
             with wave.open(io.BytesIO(wav), "rb") as source:
                 frames, rate = source.getnframes(), source.getframerate()
             if cues and cues[-1].end_ms * rate > frames * 1000:
@@ -72,10 +106,9 @@ class Engine:
                 if final.end_ms * rate - frames * 1000 > 10 * rate or final.start_ms >= duration_ms:
                     raise ValueError("Speech engine subtitle exceeds audio duration")
                 cues[-1] = Cue(final.start_ms, duration_ms, final.text)
-                return render(cues, "srt")
+            return render(cues, "srt")
         except (ValueError, wave.Error, EOFError) as exc:
             raise EngineError(str(exc)) from exc
-        return response.text
 
     async def detect(self, wav: bytes, model: str) -> dict:
         response = await self._request(wav, model, {"language": "auto", "detect_language": "true", "response_format": "verbose_json"})

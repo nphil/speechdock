@@ -30,6 +30,15 @@ The validator must be an executable copy of **the exact llama-swap binary deploy
 
 The image maps the engine’s standard `/etc/llama-swap/config` path to the same `/llama-config` mount. The validator therefore checks the real store location, not a fabricated temporary database. If an existing store file is not writable by UID/GID 1000, registration still fails safely; no permission changes are made automatically.
 
+When llama-swap runs as root, keep the existing database owner and grant SpeechDock’s shared group write access to that one file. For this host’s appdata layout:
+
+```sh
+chgrp 1000 /mnt/nvme/appdata/llama-swap/store.sqlite
+chmod g+w /mnt/nvme/appdata/llama-swap/store.sqlite
+```
+
+Record the original group and mode first. Do not delete or recreate the database, grant world-write access, or recursively change appdata permissions to make registration pass. The configuration directory must already allow UID/GID 1000 to create the validator’s temporary configuration files.
+
 The template maps port `3777` to `8000`. Install and recreate through Unraid's native Docker template path (`CreateDocker.php` with `updateContainer`), not `rebuild_container` or an ad-hoc `docker run` that loses managed-app metadata. A restart alone does not install a new image.
 
 Publish internally through HomeLabber at `https://speechdock.nateshome.net`, upstream `http://192.168.1.69:3777`. Do not add per-container Tailscale. The application has no login and belongs on a trusted LAN/tailnet, not a public route.
@@ -68,6 +77,8 @@ SpeechDock implements the Whisper ASR protocol Bazarr uses: `GET /status`, `POST
 ## Processing and storage
 
 Speech work runs one job at a time with a bounded waiting queue. Uploads are spooled to disk, not retained as whole media files in memory. A checksum-pinned Silero VAD model detects speech on the CPU, one five-minute PCM block at a time. Only bounded voiced windows are sent to llama-swap; subtitles retain their original movie timeline, including long silent openings. Digital silence produces no subtitle cues; language detection reports when no speech is available. Whisper may still miss or misrecognize speech. Cancellation takes effect at safe processing boundaries, not necessarily in the middle of an engine request.
+
+Subtitle text is preserved from each recognized segment. Cue boundaries use Whisper’s finer word/token alignment rather than its coarse segment-time predictions. Malformed, overlapping, zero-duration and physically out-of-bounds cues remain errors.
 
 Defaults: 1 GiB upload limit, six-hour audio limit and 14-day retained history. Upload limits and retention are configurable. Failed/interrupted jobs remain visible with an explanation. Removing a job or expiring its history only removes SpeechDock's own records and files, never the original media library.
 
