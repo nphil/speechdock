@@ -16,6 +16,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: '0.9.30'
+      - name: Install audio runtime
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: uv sync --locked --all-extras
       - run: uv run --locked pytest
   frontend:
