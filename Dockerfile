@@ -34,7 +34,9 @@ COPY pyproject.toml uv.lock ./
 COPY speechdock/ ./speechdock/
 RUN uv sync --locked --no-dev --no-editable && rm /usr/local/bin/uv
 COPY --from=frontend /build/ui/dist ./ui/dist
-ADD --chmod=0444 --checksum=sha256:2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f https://raw.githubusercontent.com/snakers4/silero-vad/v5.1/src/silero_vad/data/silero_vad.onnx /opt/speechdock/models/silero-vad-v5.1.onnx
+ADD --checksum=sha256:2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f https://raw.githubusercontent.com/snakers4/silero-vad/v5.1/src/silero_vad/data/silero_vad.onnx /opt/speechdock/models/silero-vad-v5.1.onnx
+RUN chmod 0555 /opt/speechdock /opt/speechdock/models \
+    && chmod 0444 /opt/speechdock/models/silero-vad-v5.1.onnx
 USER 1000:1000
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
