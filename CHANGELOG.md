@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Make the GitHub repository, release notes, Unraid template and GHCR image public. Verify anonymous access to both `latest` and `0.1.0`, so image pulls and update checks need no GitHub credentials.
+- Point the Unraid template at its public source so native template metadata can refresh. Document movie and series Whisper fallback settings and the score thresholds that keep automatic generation behind ordinary providers.
 
 ## 0.1.0 — 2026-10-31
 

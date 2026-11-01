@@ -12,7 +12,7 @@
   <Overview>Private speech and subtitle workspace using the existing llama-swap service. Registration reloads llama-swap and can interrupt its active models. Prepare writable data, models and llama-swap configuration directories for UID/GID 1000 before starting. The owned models path must be visible to llama-swap at /models/whisper/speechdock. Copy the exact deployed llama-swap executable to the validator host path and keep it executable; the mount is read-only. Keep the service on your trusted network.</Overview>
   <Category>Tools: MediaApp:Other</Category>
   <WebUI>https://speechdock.nateshome.net/</WebUI>
-  <TemplateURL/>
+  <TemplateURL>https://raw.githubusercontent.com/nphil/speechdock/main/unraid/speechdock.xml</TemplateURL>
   <Icon>https://speechdock.nateshome.net/icon-512.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <PostArgs/>
