@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>SpeechDock</Name>
+  <Repository>ghcr.io/nphil/speechdock:latest</Repository>
+  <Registry>https://github.com/nphil/speechdock/pkgs/container/speechdock</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/nphil/speechdock/issues</Support>
+  <Project>https://github.com/nphil/speechdock</Project>
+  <Overview>Private speech and subtitle workspace using the existing llama-swap service. Registration reloads llama-swap and can interrupt its active models. Prepare writable data, models and llama-swap configuration directories for UID/GID 1000 before starting. The owned models path must be visible to llama-swap at /models/whisper/speechdock. Copy the exact deployed llama-swap executable to the validator host path and keep it executable; the mount is read-only. Keep the service on your trusted network.</Overview>
+  <Category>Tools: MediaApp:Other</Category>
+  <WebUI>https://speechdock.nateshome.net/</WebUI>
+  <TemplateURL/>
+  <Icon>https://speechdock.nateshome.net/icon-512.png</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <Requires>Existing llama-swap service; prepared writable directories and matching llama-swap validator.</Requires>
+  <Config Name="Web UI" Target="8000" Default="3777" Mode="tcp" Description="SpeechDock web interface and Bazarr endpoint." Type="Port" Display="always" Required="true" Mask="false">3777</Config>
+  <Config Name="Application data" Target="/data" Default="/mnt/nvme/appdata/speechdock/data" Mode="rw" Description="Persistent settings, job history, uploads and results; writable by UID/GID 1000." Type="Path" Display="always" Required="true" Mask="false">/mnt/nvme/appdata/speechdock/data</Config>
+  <Config Name="Owned speech models" Target="/models-owned" Default="/mnt/nvme/appdata/llama-models/whisper/speechdock" Mode="rw" Description="Dedicated SpeechDock-owned models only; writable by UID/GID 1000. This directory must be visible to llama-swap at /models/whisper/speechdock." Type="Path" Display="always" Required="true" Mask="false">/mnt/nvme/appdata/llama-models/whisper/speechdock</Config>
+  <Config Name="llama-swap configuration directory" Target="/llama-config" Default="/mnt/nvme/appdata/llama-swap" Mode="rw" Description="Existing llama-swap configuration directory containing config.yaml; directory and file must be writable by UID/GID 1000 for safe atomic updates and backups." Type="Path" Display="always" Required="true" Mask="false">/mnt/nvme/appdata/llama-swap</Config>
+  <Config Name="llama-swap validator" Target="/validator/llama-swap" Default="/mnt/nvme/appdata/speechdock/tools/llama-swap" Mode="ro" Description="Host file containing an executable copy of the exact deployed llama-swap binary. Refresh the copy after updating llama-swap." Type="Path" Display="always" Required="true" Mask="false">/mnt/nvme/appdata/speechdock/tools/llama-swap</Config>
+  <Config Name="Engine URL" Target="SPDOCK_ENGINE_URL" Default="https://llama.nateshome.net" Mode="" Description="Existing llama-swap URL. The initial value is saved as an application setting; change it later in Settings." Type="Variable" Display="always" Required="true" Mask="false">https://llama.nateshome.net</Config>
+  <Config Name="llama-swap model path" Target="SPDOCK_ENGINE_MODELS_DIR" Default="/models/whisper/speechdock" Mode="" Description="The path at which llama-swap sees the same host directory mounted above as owned speech models." Type="Variable" Display="advanced" Required="true" Mask="false">/models/whisper/speechdock</Config>
+  <Config Name="Trusted proxy addresses" Target="FORWARDED_ALLOW_IPS" Default="127.0.0.1,::1,192.168.1.71" Mode="" Description="Only trusted reverse-proxy peer addresses; needed to recognize HTTPS requests through Caddy. Adjust for the actual peer address seen by this container. Never use a wildcard." Type="Variable" Display="advanced" Required="true" Mask="false">127.0.0.1,::1,192.168.1.71</Config>
+</Container>

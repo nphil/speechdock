@@ -1,0 +1,112 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Project version without v (for example 0.1.0)'
+        required: true
+        type: string
+      notes:
+        description: 'Human-readable release notes (Markdown)'
+        required: true
+        type: string
+concurrency:
+  group: speechdock-release
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+  publish:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$REF" == refs/heads/main ]] || { echo 'Release must run from main'; exit 1; }
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'Version must be a stable X.Y.Z'; exit 1; }
+          [[ "$NOTES" =~ [^[:space:]] ]] || { echo 'Release notes cannot be blank'; exit 1; }
+          python3 -c 'import os,tomllib; v=tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]; assert v == os.environ["VERSION"], f"Project version {v} differs from release"'
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            echo 'Release tag already exists'; exit 1
+          else
+            code=$?
+            [ "$code" -eq 2 ] || exit "$code"
+          fi
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the exact release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          provenance: false
+          sbom: false
+          tags: speechdock-smoke:local
+          build-args: |
+            VERSION=${{ inputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ env.created }}
+      - name: Check labels and smoke-test the image
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          labels=$(docker image inspect speechdock-smoke:local --format '{{json .Config.Labels}}')
+          test "$(jq -r '.["org.opencontainers.image.version"]' <<< "$labels")" = "$VERSION"
+          test "$(jq -r '.["org.opencontainers.image.source"]' <<< "$labels")" = 'https://github.com/nphil/speechdock'
+          test "$(jq -r '.["org.opencontainers.image.revision"]' <<< "$labels")" = "$GITHUB_SHA"
+          docker run -d --name speechdock-smoke -p 127.0.0.1:18000:8000 speechdock-smoke:local
+          trap 'docker logs speechdock-smoke; docker rm -f speechdock-smoke' EXIT
+          for i in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:18000/health > "$RUNNER_TEMP/health.json"; then break; fi
+            sleep 1
+          done
+          test -s "$RUNNER_TEMP/health.json"
+          jq -e --arg version "$VERSION" '.status == "ok" and .version == $version' "$RUNNER_TEMP/health.json"
+          curl --fail --silent http://127.0.0.1:18000/ -o "$RUNNER_TEMP/index.html"
+          grep -qi '<html' "$RUNNER_TEMP/index.html"
+          curl --fail --silent http://127.0.0.1:18000/icon.svg -o "$RUNNER_TEMP/icon.svg"
+          grep -qi '<svg' "$RUNNER_TEMP/icon.svg"
+          curl --fail --silent http://127.0.0.1:18000/icon-512.png -o "$RUNNER_TEMP/icon.png"
+          python3 -c 'import pathlib,sys; assert pathlib.Path(sys.argv[1]).read_bytes().startswith(bytes.fromhex("89504e470d0a1a0a"))' "$RUNNER_TEMP/icon.png"
+          test "$(docker inspect speechdock-smoke --format '{{.Config.User}}')" = '1000:1000'
+          docker exec speechdock-smoke ffmpeg -version >/dev/null
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tested version and check its manifest
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          image=ghcr.io/nphil/speechdock
+          docker tag speechdock-smoke:local "$image:$VERSION"
+          docker push "$image:$VERSION"
+          docker buildx imagetools inspect --raw "$image:$VERSION" > "$RUNNER_TEMP/manifest.json"
+          jq -e '.mediaType == "application/vnd.docker.distribution.manifest.v2+json" or .mediaType == "application/vnd.oci.image.manifest.v1+json"' "$RUNNER_TEMP/manifest.json"
+      - name: Create release and publish latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/release-notes.md"
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "SpeechDock $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          docker tag speechdock-smoke:local ghcr.io/nphil/speechdock:latest
+          docker push ghcr.io/nphil/speechdock:latest
