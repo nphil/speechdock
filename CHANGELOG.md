@@ -7,6 +7,7 @@
 - Package a pinned CUDA 12 CrispASR runtime for on-demand execution inside the existing llama-swap container, with verified immutable assets and a fail-closed GPU launcher. Parakeet uses its native word timing; Canary transcription uses explicitly labelled DTW estimates. Parakeet CUDA execution is verified on the Tesla P40; model quality and speed must be judged on representative speech, not hardware compatibility alone. Canary translation is not enabled.
 - Keep language detection on its own compatible model when choosing a transcription backend without language identification.
 - Add optional English CPU forced alignment for Marquee using exact selected Plex media/audio/subtitle identities, read-only server-side media mappings and a pinned ONNX model. Preserve authored cue bounds and retain estimated reveal for unsupported or mismatched speech; reject obsolete playback and seek generations. This source integration has local fixture proof, not production Plex or TV deployment proof.
+- Clarify that a verified source revision does not imply acoustic alignment: consumers must honor each cue’s status and discard old word timing on estimated fallback or source change.
 
 ## 0.1.3 — 2026-11-01
 
