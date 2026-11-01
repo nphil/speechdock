@@ -84,6 +84,112 @@ def iter_wav_chunks(pcm_path: Path, chunk_seconds: int = MAX_CHUNK_SECONDS):
             offset += len(pcm)
 
 
+class SpeechDetector:
+    """CPU-only Silero v5 detector with recording-local streaming state."""
+
+    def __init__(self, model_path: Path):
+        import numpy as np
+        import onnxruntime as ort
+
+        self.np = np
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
+        self.state = np.zeros((2, 1, 128), dtype=np.float32)
+        self.context = np.zeros((1, 64), dtype=np.float32)
+        self.sample_rate = np.array(RATE, dtype=np.int64)
+
+    def probabilities(self, pcm: bytes):
+        np = self.np
+        samples = np.frombuffer(pcm, dtype="<i2")
+        for start in range(0, len(samples), 512):
+            frame = np.zeros((1, 512), dtype=np.float32)
+            part = samples[start:start + 512]
+            frame[0, :len(part)] = part.astype(np.float32) / 32768
+            data = np.concatenate((self.context, frame), axis=1)
+            result, self.state = self.session.run(None, {"input": data, "state": self.state, "sr": self.sample_rate})
+            self.context = data[:, -64:]
+            yield float(result[0, 0])
+
+
+def _speech_windows(probabilities, sample_count: int):
+    """Find speech with hysteresis and preserve context without overlapping windows."""
+    spans, quiet = [], []
+    start = silence = None
+    for index, probability in enumerate(probabilities):
+        position = index * 512
+        if probability < 0.35:
+            quiet.append(position)
+        if probability >= 0.5:
+            if start is None:
+                start = position
+            silence = None
+        elif start is not None and probability < 0.35:
+            if silence is None:
+                silence = position
+            if position - silence >= RATE // 2:
+                if silence - start >= RATE // 10:
+                    spans.append((start, silence))
+                start = silence = None
+    if start is not None and sample_count - start >= RATE // 10:
+        spans.append((start, sample_count))
+
+    windows = []
+    previous_speech_end = 0
+    limit = 28 * RATE
+    for speech_start, speech_end in spans:
+        start, end = max(0, speech_start - RATE), min(sample_count, speech_end + RATE)
+        if windows and start <= windows[-1][1] + 2 * RATE and end - windows[-1][0] <= limit:
+            windows[-1] = (windows[-1][0], max(end, windows[-1][1]))
+            previous_speech_end = speech_end
+            continue
+        if windows and start < windows[-1][1]:
+            boundary = ((previous_speech_end + speech_start) // 2) // (RATE // 100) * (RATE // 100)
+            windows[-1] = (windows[-1][0], boundary)
+            start = boundary
+        while end - start > limit:
+            # Prefer a short pause near the limit; only split speech when none exists.
+            candidates = [point for point in quiet if start + 20 * RATE <= point <= start + limit]
+            boundary = candidates[-1] if candidates else start + limit
+            windows.append((start, boundary))
+            start = boundary
+        if end > start:
+            windows.append((start, end))
+        previous_speech_end = speech_end
+    # Align PCM cuts to Whisper's 10 ms timestamp grid.
+    tick = RATE // 100
+    return [(start // tick * tick, end if end == sample_count else end // tick * tick)
+            for start, end in windows]
+
+
+def speech_wav_chunks(wav_data: bytes, detector: SpeechDetector):
+    """Return bounded speech WAVs with offsets relative to one 300-second WAV."""
+    with wave.open(io.BytesIO(wav_data), "rb") as wav:
+        if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getcomptype()) != (1, 2, RATE, "NONE"):
+            raise ValueError("Expected mono 16 kHz 16-bit PCM WAV")
+        if wav.getnframes() > MAX_CHUNK_SECONDS * RATE:
+            raise ValueError("Speech detection chunk exceeds 300 seconds")
+        pcm = wav.readframes(wav.getnframes())
+    chunks = []
+    for start, end in _speech_windows(detector.probabilities(pcm), len(pcm) // 2):
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav:
+            wav.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+            wav.writeframes(pcm[start * 2:end * 2])
+        chunks.append((start / RATE, buffer.getvalue()))
+    return chunks
+
+
+def iter_speech_wav_chunks(pcm_path: Path, vad_model_path: Path):
+    """Yield speech-only WAVs and their original offsets, using Silero v5 ONNX."""
+    detector = SpeechDetector(vad_model_path)
+    for chunk_offset, wav_data in iter_wav_chunks(pcm_path):
+        for offset, speech_wav in speech_wav_chunks(wav_data, detector):
+            yield chunk_offset + offset, speech_wav
+
+
+
 _TIMESTAMP = r"(\d{2,}):(\d{2}):(\d{2})[,.](\d{3})"
 _TIMING = re.compile(rf"^{_TIMESTAMP}\s*-->\s*{_TIMESTAMP}\s*$")
 

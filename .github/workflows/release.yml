@@ -84,6 +84,18 @@ jobs:
           python3 -c 'import pathlib,sys; assert pathlib.Path(sys.argv[1]).read_bytes().startswith(bytes.fromhex("89504e470d0a1a0a"))' "$RUNNER_TEMP/icon.png"
           test "$(docker inspect speechdock-smoke --format '{{.Config.User}}')" = '1000:1000'
           docker exec speechdock-smoke ffmpeg -version >/dev/null
+          docker exec -i speechdock-smoke python - <<'PY'
+          import io
+          import wave
+          from pathlib import Path
+          from speechdock.audio import SpeechDetector, speech_wav_chunks
+          audio = io.BytesIO()
+          with wave.open(audio, "wb") as wav:
+              wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+              wav.writeframes(b"\x00\x00" * 16000)
+          detector = SpeechDetector(Path("/opt/speechdock/models/silero-vad-v5.1.onnx"))
+          assert speech_wav_chunks(audio.getvalue(), detector) == [], "Silence must not become subtitles"
+          PY
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io

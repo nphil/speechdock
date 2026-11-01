@@ -1,4 +1,8 @@
+import asyncio
+import io
+import threading
 import uuid
+import wave
 
 import httpx
 import pytest
@@ -29,23 +33,160 @@ async def test_restart_removes_orphan_pcm_but_preserves_unowned_files(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_completed_detection_is_accessible_from_job_detail(tmp_path, monkeypatch):
+async def test_detection_uses_first_voiced_window(tmp_path, monkeypatch):
     monkeypatch.setattr(application, "DATA_DIR", tmp_path / "data")
     monkeypatch.setenv("SPDOCK_MODELS_DIR", str(tmp_path / "models"))
     monkeypatch.setenv("SPDOCK_LLAMA_CONFIG", str(tmp_path / "config.yaml"))
+    async def normalize(path, pcm, encode):
+        pcm.write_bytes(b"pcm")
+        return 600
+    async def model_for(*args):
+        return {}
+    calls = []
+    class Engine:
+        def __init__(self, settings):
+            pass
+        async def detect(self, wav, model):
+            calls.append(wav)
+            return {"language_code": "en", "detected_language": "english"}
+    monkeypatch.setattr(application, "normalize_audio", normalize)
+    monkeypatch.setattr(application, "model_for", model_for)
+    monkeypatch.setattr(application, "Engine", Engine)
+    monkeypatch.setattr(application, "SpeechDetector", lambda path: object())
+    monkeypatch.setattr(application, "iter_wav_chunks", lambda path: iter([(0, b"silent"), (300, b"speech")]))
+    monkeypatch.setattr(application, "speech_wav_chunks", lambda wav, detector: [] if wav == b"silent" else [(2, b"voice"), (5, b"later")])
     async with application.lifespan(application.app):
-        async def detect(job, path, progress):
-            return {"result_json": {"language_code": "en", "detected_language": "english"}}
-        application.app.state.jobs.processor = detect
-        class Upload:
-            async def read(self, size):
-                if hasattr(self, "done"):
-                    return b""
-                self.done = True
-                return b"audio"
-        job = await application.app.state.jobs.submit(Upload(), source="api", filename="clip", task="detect", language="auto", model="whisper-1")
-        await application.app.state.jobs.wait(job["id"])
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application.app), base_url="http://test") as client:
-            response = await client.get(f'/api/jobs/{job["id"]}')
-            assert response.status_code == 200
-            assert response.json()["detection"] == {"language_code": "en", "detected_language": "english"}
+            response = await client.post("/api/jobs", data={"task": "detect"}, files={"file": ("clip.wav", b"audio", "audio/wav")})
+            job_id = response.json()["id"]
+            assert (await application.app.state.jobs.wait(job_id))["status"] == "completed"
+            detail = await client.get(f"/api/jobs/{job_id}")
+            assert detail.json()["detection"]["language_code"] == "en"
+            assert calls == [b"voice"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task", ["transcribe", "translate", "detect"])
+async def test_no_speech_jobs_never_call_engine(tmp_path, monkeypatch, task):
+    monkeypatch.setattr(application, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setenv("SPDOCK_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("SPDOCK_LLAMA_CONFIG", str(tmp_path / "config.yaml"))
+    async def normalize(path, pcm, encode):
+        pcm.write_bytes(b"pcm")
+        return 10
+    async def model_for(*args):
+        return {}
+    class NoEngineCalls:
+        def __init__(self, settings):
+            pass
+        async def transcribe(self, *args):
+            pytest.fail("No speech should reach the engine")
+        async def detect(self, *args):
+            pytest.fail("No speech should reach the engine")
+    monkeypatch.setattr(application, "normalize_audio", normalize)
+    monkeypatch.setattr(application, "model_for", model_for)
+    monkeypatch.setattr(application, "Engine", NoEngineCalls)
+    monkeypatch.setattr(application, "SpeechDetector", lambda path: object())
+    monkeypatch.setattr(application, "iter_wav_chunks", lambda path: iter([(0, b"wav")]))
+    monkeypatch.setattr(application, "speech_wav_chunks", lambda wav, detector: [])
+    async with application.lifespan(application.app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application.app), base_url="http://test") as client:
+            response = await client.post("/api/jobs", data={"task": task}, files={"file": ("silent.wav", b"audio", "audio/wav")})
+            assert response.status_code == 202
+            job_id = response.json()["id"]
+            result = await application.app.state.jobs.wait(job_id)
+            if task == "detect":
+                assert result["status"] == "failed"
+                assert "no speech" in result["error"]
+            else:
+                assert result["status"] == "completed"
+                output = await client.get(f"/api/jobs/{job_id}/result")
+                assert output.status_code == 200 and output.text == ""
+            assert not list((tmp_path / "data" / "uploads").glob("*.pcm"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("end,valid", [("01,000", True), ("02,001", False)])
+async def test_voice_windows_keep_original_offsets(tmp_path, monkeypatch, end, valid):
+    monkeypatch.setattr(application, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setenv("SPDOCK_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("SPDOCK_LLAMA_CONFIG", str(tmp_path / "config.yaml"))
+    async def normalize(path, pcm, encode):
+        pcm.write_bytes(b"pcm")
+        return 600
+    async def model_for(*args):
+        return {}
+    calls = []
+    class Engine:
+        def __init__(self, settings):
+            pass
+        async def transcribe(self, wav, model, language, task):
+            calls.append(wav)
+            return f"1\n00:00:00,500 --> 00:00:{end}\nHello\n"
+    detector = object()
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        wav.writeframes(bytes(32000 * 2))
+    voice = buffer.getvalue()
+    monkeypatch.setattr(application, "normalize_audio", normalize)
+    monkeypatch.setattr(application, "model_for", model_for)
+    monkeypatch.setattr(application, "Engine", Engine)
+    monkeypatch.setattr(application, "SpeechDetector", lambda path: detector)
+    monkeypatch.setattr(application, "iter_wav_chunks", lambda path: iter([(0, b"first"), (300, b"second")]))
+    def windows(wav, current):
+        assert current is detector
+        return [] if wav == b"first" else [(12.25, voice)]
+    monkeypatch.setattr(application, "speech_wav_chunks", windows)
+    async with application.lifespan(application.app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application.app), base_url="http://test") as client:
+            response = await client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")})
+            job_id = response.json()["id"]
+            job = await application.app.state.jobs.wait(job_id)
+            if valid:
+                assert job["status"] == "completed"
+                result = await client.get(f"/api/jobs/{job_id}/result")
+                assert "00:05:12,750 --> 00:05:13,250" in result.text
+            else:
+                assert job["status"] == "failed"
+                assert "beyond its audio window" in job["error"]
+            assert calls == [voice]
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_voice_detection_cleans_temporary_audio(tmp_path, monkeypatch):
+    monkeypatch.setattr(application, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setenv("SPDOCK_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("SPDOCK_LLAMA_CONFIG", str(tmp_path / "config.yaml"))
+    started, release = threading.Event(), threading.Event()
+    async def normalize(path, pcm, encode):
+        pcm.write_bytes(b"pcm")
+        return 10
+    async def model_for(*args):
+        return {}
+    def windows(wav, detector):
+        started.set()
+        assert release.wait(10)
+        return [(0, b"voice")]
+    class Engine:
+        def __init__(self, settings):
+            pass
+        async def transcribe(self, *args):
+            pytest.fail("Cancelled speech must not reach the engine")
+    monkeypatch.setattr(application, "normalize_audio", normalize)
+    monkeypatch.setattr(application, "model_for", model_for)
+    monkeypatch.setattr(application, "Engine", Engine)
+    monkeypatch.setattr(application, "SpeechDetector", lambda path: object())
+    monkeypatch.setattr(application, "iter_wav_chunks", lambda path: iter([(0, b"wav")]))
+    monkeypatch.setattr(application, "speech_wav_chunks", windows)
+    async with application.lifespan(application.app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application.app), base_url="http://test") as client:
+            response = await client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")})
+            job_id = response.json()["id"]
+            try:
+                assert await asyncio.to_thread(started.wait, 10)
+                assert (await client.post(f"/api/jobs/{job_id}/cancel")).status_code == 200
+            finally:
+                release.set()
+            assert (await application.app.state.jobs.wait(job_id))["status"] == "cancelled"
+            assert not list((tmp_path / "data" / "uploads").glob("*.pcm"))

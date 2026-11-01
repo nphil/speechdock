@@ -1,10 +1,12 @@
 """Client for the shared llama-swap / whisper-server instance."""
 
+import io
+import wave
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .audio import parse_srt
+from .audio import Cue, parse_srt, render
 from .languages import LANGUAGES, normalize_language
 
 
@@ -59,8 +61,19 @@ class Engine:
             fields["translate"] = "true"
         response = await self._request(wav, model, fields)
         try:
-            parse_srt(response.text)
-        except ValueError as exc:
+            cues = parse_srt(response.text)
+            with wave.open(io.BytesIO(wav), "rb") as source:
+                frames, rate = source.getnframes(), source.getframerate()
+            if cues and cues[-1].end_ms * rate > frames * 1000:
+                # whisper.cpp may round the final end one 10 ms tick beyond
+                # the supplied audio; never alter other invalid timings.
+                duration_ms = frames * 1000 // rate
+                final = cues[-1]
+                if final.end_ms * rate - frames * 1000 > 10 * rate or final.start_ms >= duration_ms:
+                    raise ValueError("Speech engine subtitle exceeds audio duration")
+                cues[-1] = Cue(final.start_ms, duration_ms, final.text)
+                return render(cues, "srt")
+        except (ValueError, wave.Error, EOFError) as exc:
             raise EngineError(str(exc)) from exc
         return response.text
 

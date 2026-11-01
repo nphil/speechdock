@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -201,6 +202,46 @@ async def test_register_and_unregister_preserve_existing_config(manager):
         assert parsed["models"][name] == model
     await instance.delete("tiny", confirm=True)
     assert not (instance.models_dir / CATALOG["tiny"]["filename"]).exists()
+
+
+async def test_registration_validates_exact_candidate_with_accessible_runtime_store(manager, tmp_path, monkeypatch):
+    instance, _, config, _, validator = manager
+    if not validator:
+        pytest.skip("Set SPDOCK_TEST_LLAMA_VALIDATOR to the official v268 llama-swap binary")
+
+    # The real validator checks store.path in its own filesystem, even with -validate.
+    store_dir = tmp_path / "engine-runtime"
+    original = CONFIG + f"store:\n  path: {store_dir / 'state.db'}\n"
+    config.write_text(original)
+    await instance.install("tiny")
+    assert (await wait_for_download(instance))["status"] in {"completed", "complete"}
+
+    with pytest.raises(ModelError, match="store.path"):
+        await instance.register("tiny", confirm_reload=True)
+    assert config.read_text() == original
+
+    # Map the engine namespace to the same config directory, not a copy.
+    store = config.parent / "state.db"
+    store.write_bytes(b"existing engine store")
+    store_dir.symlink_to(config.parent, target_is_directory=True)
+    captured = tmp_path / "validated.yaml"
+    wrapper = tmp_path / "validator"
+    wrapper.write_text(f'#!/bin/sh\ncp "$2" {shlex.quote(str(captured))}\nexec {shlex.quote(str(validator))} "$@"\n')
+    wrapper.chmod(0o755)
+    instance.validator = wrapper
+    definition = instance._definition
+    monkeypatch.setattr(instance, "_definition", lambda entry: {**definition(entry), "ttl": -2})
+    with pytest.raises(ModelError, match="invalid TTL"):
+        await instance.register("tiny", confirm_reload=True)
+    assert config.read_text() == original
+    assert YAML().load(captured.read_text())["models"]["speechdock-tiny"]["ttl"] == -2
+
+    monkeypatch.setattr(instance, "_definition", definition)
+    await instance.register("tiny", confirm_reload=True)
+    assert captured.read_bytes() == config.read_bytes()
+    assert (instance.data_dir / "llama-swap-config.backup.yaml").read_text() == original
+    assert YAML().load(config.read_text())["store"]["path"] == str(store_dir / "state.db")
+    assert store.read_bytes() == b"existing engine store"
 
 
 async def test_external_edits_to_owned_model_are_not_overwritten(manager):

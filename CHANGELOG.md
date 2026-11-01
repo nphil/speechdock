@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-11-01
 
+- Detect speech with a checksum-pinned CPU Silero model before sending bounded audio windows to Whisper. Preserve original movie timestamps and return empty subtitles for genuine silence rather than hallucinated speech.
+- Handle the observed one-tick final timestamp rounding at the exact supplied-audio boundary; keep invalid, overlapping and zero-duration subtitle rejection.
+- Expose the real mounted llama-swap configuration at its engine runtime path inside the image so its exact validator can check model registration without a false missing-store-directory error.
 - Make the GitHub repository, release notes, Unraid template and GHCR image public. Verify anonymous access to both `latest` and `0.1.0`, so image pulls and update checks need no GitHub credentials.
 - Point the Unraid template at its public source so native template metadata can refresh. Document movie and series Whisper fallback settings and the score thresholds that keep automatic generation behind ordinary providers.
 

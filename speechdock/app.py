@@ -1,9 +1,12 @@
 """HTTP interface for SpeechDock and Bazarr."""
 from __future__ import annotations
 
+import asyncio
+import io
 import os
 import re
 import shutil
+import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -13,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import __version__
-from .audio import Cue, iter_wav_chunks, normalize_audio, parse_srt, render
+from .audio import SpeechDetector, iter_wav_chunks, normalize_audio, parse_srt, render, speech_wav_chunks
 from .engine import Engine
 from .jobs import JobConflict, JobManager, JobNotFound, QueueFull, UploadTooLarge
 from .languages import normalize_language
@@ -106,21 +109,29 @@ async def lifespan(app: FastAPI):
                 raise ValueError("Audio exceeds the six-hour limit")
             await progress(0, duration)
             cues = []
-            for offset, wav in iter_wav_chunks(pcm):
-                if job["task"] == "detect":
-                    result = await engine.detect(wav, job["model"])
-                    await progress(1, duration)
-                    return {"result_json": result, "duration_seconds": duration}
-                text = await engine.transcribe(wav, job["model"], job["language"], job["task"])
-                next_cues = parse_srt(text, offset)
-                if cues and cues[-1].end_ms > round(offset * 1000):
-                    last = cues[-1]
-                    boundary = round(offset * 1000)
-                    if last.start_ms >= boundary:
-                        raise ValueError("Subtitle extends beyond its audio chunk")
-                    cues[-1] = Cue(last.start_ms, boundary, last.text)
-                cues.extend(next_cues)
-                await progress(min(1, (offset + 300) / duration) if duration else 1, duration)
+            detector = await asyncio.to_thread(
+                SpeechDetector, Path(os.environ.get("SPDOCK_VAD_MODEL", "/opt/speechdock/models/silero-vad-v5.1.onnx"))
+            )
+            for chunk_offset, wav in iter_wav_chunks(pcm):
+                windows = await asyncio.to_thread(speech_wav_chunks, wav, detector)
+                await progress(min(1, chunk_offset / duration) if duration else 1, duration)
+                for relative_offset, speech_wav in windows:
+                    offset = chunk_offset + relative_offset
+                    if job["task"] == "detect":
+                        result = await engine.detect(speech_wav, job["model"])
+                        await progress(1, duration)
+                        return {"result_json": result, "duration_seconds": duration}
+                    text = await engine.transcribe(speech_wav, job["model"], job["language"], job["task"])
+                    next_cues = parse_srt(text, offset)
+                    with wave.open(io.BytesIO(speech_wav), "rb") as source:
+                        window_ms = source.getnframes() * 1000 // source.getframerate()
+                    if next_cues and next_cues[-1].end_ms > round(offset * 1000) + window_ms:
+                        raise ValueError("Subtitle extends beyond its audio window")
+                    cues.extend(next_cues)
+                    await progress(min(1, offset / duration) if duration else 1, duration)
+                await progress(min(1, (chunk_offset + 300) / duration) if duration else 1, duration)
+            if job["task"] == "detect":
+                raise ValueError("Cannot detect language: no speech found in the recording")
             return {"result_text": render(cues, "srt"), "duration_seconds": duration}
         finally:
             pcm.unlink(missing_ok=True)
