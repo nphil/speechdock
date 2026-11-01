@@ -15,7 +15,7 @@ Whisper Turbo is the fast transcription default. **Turbo cannot translate.** Eng
 
 ## Unraid installation
 
-Use [`unraid/speechdock.xml`](unraid/speechdock.xml). The image is `ghcr.io/nphil/speechdock:latest`; the repository and package are private. Unraid must have working GHCR pull credentials that also survive reboot. GitHub repository privacy and container-package access are separate settings.
+Use [`unraid/speechdock.xml`](unraid/speechdock.xml). The image is `ghcr.io/nphil/speechdock:latest`. The GitHub repository, release notes and template are public. The GHCR container package has separate visibility and currently requires authenticated pulls, so Unraid still needs working GHCR credentials that survive reboot. Making the repository public does not change the image permissions.
 
 | Container path | Host path | Access |
 | --- | --- | --- |

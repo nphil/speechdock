@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Make the GitHub repository, release notes and Unraid template public. The GHCR container image retains separate access permissions.
+
 ## 0.1.0 — 2026-10-31
 
 - Add a local speech workspace with activity history, audio/video uploads, subtitle previews and SRT/WebVTT/text downloads.
