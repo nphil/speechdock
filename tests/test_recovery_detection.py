@@ -41,10 +41,11 @@ async def test_detection_uses_first_voiced_window(tmp_path, monkeypatch):
         pcm.write_bytes(b"pcm")
         return 600
     async def model_for(*args):
-        return {}
+        return {"runtime": "whisper.cpp", "architecture": "whisper"}
     calls = []
     class Engine:
-        def __init__(self, settings):
+        def __init__(self, settings, *, runtime, architecture):
+            assert (runtime, architecture) == ("whisper.cpp", "whisper")
             pass
         async def detect(self, wav, model):
             calls.append(wav)
@@ -75,9 +76,9 @@ async def test_no_speech_jobs_never_call_engine(tmp_path, monkeypatch, task):
         pcm.write_bytes(b"pcm")
         return 10
     async def model_for(*args):
-        return {}
+        return {"runtime": "whisper.cpp", "architecture": "whisper"}
     class NoEngineCalls:
-        def __init__(self, settings):
+        def __init__(self, settings, *, runtime, architecture):
             pass
         async def transcribe(self, *args):
             pytest.fail("No speech should reach the engine")
@@ -115,10 +116,10 @@ async def test_voice_windows_keep_original_offsets(tmp_path, monkeypatch, end, v
         pcm.write_bytes(b"pcm")
         return 600
     async def model_for(*args):
-        return {}
+        return {"runtime": "whisper.cpp", "architecture": "whisper"}
     calls = []
     class Engine:
-        def __init__(self, settings):
+        def __init__(self, settings, *, runtime, architecture):
             pass
         async def transcribe(self, wav, model, language, task):
             calls.append(wav)
@@ -163,13 +164,13 @@ async def test_cancel_during_voice_detection_cleans_temporary_audio(tmp_path, mo
         pcm.write_bytes(b"pcm")
         return 10
     async def model_for(*args):
-        return {}
+        return {"runtime": "whisper.cpp", "architecture": "whisper"}
     def windows(wav, detector):
         started.set()
         assert release.wait(10)
         return [(0, b"voice")]
     class Engine:
-        def __init__(self, settings):
+        def __init__(self, settings, *, runtime, architecture):
             pass
         async def transcribe(self, *args):
             pytest.fail("Cancelled speech must not reach the engine")

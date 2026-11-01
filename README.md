@@ -2,7 +2,9 @@
 
 A local speech-to-subtitles workspace for Bazarr and other clients. SpeechDock handles uploads, timed subtitle files, activity history and speech-model management; your existing llama-swap service runs the models.
 
-One CPU-only container. No second inference server, GPU access, Docker socket or production Node.js runtime.
+One CPU-only app container. The existing llama-swap service launches model servers on demand; SpeechDock itself needs neither GPU access, a Docker socket nor a production Node.js runtime.
+
+Version 0.2.0 adds manual model imports, an optional GGUF speech runtime and CPU subtitle alignment. Parakeet CUDA execution is verified on the Tesla P40. CPU alignment has real local Plex-fixture and Marquee HTTP proof; it still requires production Plex credentials/read-only mounts and the separately owned TV integration before use.
 
 ## Use it
 
@@ -11,7 +13,7 @@ One CPU-only container. No second inference server, GPU access, Docker socket or
 - **Models:** download checksum-verified Whisper models, apply them to llama-swap, and remove only SpeechDock-owned models.
 - **Settings:** choose the engine, transcription and translation models, language, timeouts, upload limit and history retention.
 
-Whisper Turbo is the fast transcription default. **Turbo cannot translate.** English translation uses a separate translation-capable model, with full Whisper Large-v3 as the initial selection. Translation fails clearly until that model is installed and applied; it never silently substitutes Turbo.
+Whisper Turbo is the fast transcription default. **Turbo cannot translate.** English audio translation uses a separate translation-capable model and fails clearly until that model is installed and registered; it never silently substitutes Turbo. Language detection has its own compatible model selection, so choosing a transcription backend without language identification does not silently change Bazarr detection.
 
 ## Unraid installation
 
@@ -68,11 +70,35 @@ SpeechDock implements the Whisper ASR protocol Bazarr uses: `GET /status`, `POST
 
 ## Model safety
 
-- Downloads come from a fixed official Whisper catalogue, pinned to a revision with exact size and SHA-256 verification. Arbitrary download URLs are not accepted.
+- The official Whisper catalogue pins exact revisions, sizes and SHA-256 hashes. Manual imports additionally accept supported files or direct public HTTPS links, with optional expected hash and size; a calculated hash alone does not establish who published a model.
 - Existing shared models, including the `whisper-1` Turbo alias, are read-only. SpeechDock edits only its own `speechdock-*` definitions and `speechdock` group, preserving unrelated YAML and detecting conflicting edits.
 - **Applying or removing model definitions reloads llama-swap and interrupts its loaded models.** The UI requires a separate confirmation and keeps a configuration backup. The engine must be running with configuration watching enabled.
 - Loading a managed speech model can evict warmed chat models. A free-GPU-memory launch guard reserves conservative headroom; its thresholds are not measured performance or memory benchmarks. Other GPU services retain priority.
 - Model-file size is not GPU-memory consumption. Full Large-v3 is about 3.1 GB on disk, and has a higher memory requirement than its quantized variants.
+
+### Manual imports and on-demand runtimes
+
+In **Models → Import a model**, choose a local file or a direct download URL. Supported formats are Whisper GGML and the validated legacy Parakeet/Canary GGUF variants supported by the pinned CrispASR runtime—not arbitrary chat-model GGUF, Safetensors, archives or newer incompatible speech architectures. Files are streamed into private staging, limited to 8 GiB and checked structurally before publication. URL downloads allow only public HTTPS on port 443, validate and pin DNS addresses, and recheck redirects. Signed URLs stay transient; only a source hostname and optional display filename are saved.
+
+Supplying a publisher SHA-256 gives a **checksum match**. Without it, the UI says the checksum was calculated, not independently verified. Unknown transfer lengths show indeterminate progress. Cancellation and interrupted-start recovery never publish partial files. Removing an import affects only its verified owned file and record, not the original upload or media library.
+
+Importing does **not** register or load a model. Review its detected format, runtime and task capabilities, then explicitly register it. The packaged CrispASR CUDA 12 runtime is copied atomically to an immutable versioned directory beneath the existing shared owned-model mount; no new container, port or always-running service is added. The GPU launcher fails rather than silently running on the CPU when CUDA is unavailable.
+
+Parakeet transcription uses native word timing. Canary transcription uses source-validated DTW estimates, not native word alignment, and requires an explicit spoken language. Neither backend provides verified language detection here; Canary translation is disabled. Whisper remains available. For translation of existing subtitles into other languages, use a subtitle-text translator such as Lingarr with a suitable text model; it is separate from SpeechDock and does not repair source transcription or timing errors.
+
+### Optional Marquee CPU alignment
+
+The unreleased `POST /api/alignment/windows` service aligns exact English subtitle text to selected audio using a pinned quantized wav2vec2 CTC model on the CPU. An independent, unprompted recognition check rejects mismatched text, silence and unsupported characters. It preserves authored cue bounds and returns estimated fallback, never invented word times, when alignment is unsafe. Requests and responses bind the exact playback, seek generation, Plex media/part/audio/subtitle identity, subtitle digest and cue manifest. The Marquee client rejects stale responses and requires the actual selected renderer-ready subtitle source.
+
+Configure these trusted server-side variables and mount media **read-only** before enabling the client endpoint:
+
+- `SPDOCK_ALIGNMENT_PLEX_URL`: the trusted Plex server origin, without token, query or path.
+- `SPDOCK_ALIGNMENT_PLEX_TOKEN_FILE`: a private readable token file; never send it from the client or include it in a URL.
+- `SPDOCK_ALIGNMENT_ROOTS`: JSON mappings such as `[{"plex":"/PMS/movies","local":"/media/movies"}]` matching Plex paths to read-only container mounts.
+- `SPDOCK_ALIGNMENT_MODEL_DIR`: `/opt/speechdock/models/alignment` in the packaged image. Its model, vocabulary, configuration, provenance and Apache-2.0 license are baked in and checksummed; requests never download assets.
+
+Missing configuration does not break ordinary SpeechDock jobs: alignment reports an explicit estimated result. Alignment admits one active CPU request and one waiting request, uses bounded windows and has no persistent result cache. Marquee diagnostics require separate session-only consent and default off. Local fixtures prove real CPU alignment and Rust HTTP exchange, including stale-generation rejection; no production Plex mount, TV activation or deployment is implied.
+
 
 ## Processing and storage
 

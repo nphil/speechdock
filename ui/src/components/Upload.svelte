@@ -17,7 +17,9 @@
   let model = '';
   let available: Model[] = [];
 
-  $: available = models.filter(item => item.registered && (task !== 'translate' || item.translation_capable));
+  $: available = models.filter(item => item.registered && (task !== 'translate' || item.translation_capable) && (task !== 'detect' || item.language_detection_capable));
+  $: selected = available.find(item => item.model_id === model);
+  $: languageRequired = !!selected?.requires_language && (!language.trim() || language.trim().toLowerCase() === 'auto');
 
   async function load() {
     loading = true;
@@ -35,8 +37,8 @@
   onMount(() => { void load(); });
 
   function chooseDefault() {
-    const preferred = task === 'translate' ? settings?.translation_model : settings?.transcription_model;
-    const options = models.filter(item => item.registered && (task !== 'translate' || item.translation_capable));
+    const preferred = task === 'translate' ? settings?.translation_model : task === 'detect' ? settings?.detection_model : settings?.transcription_model;
+    const options = models.filter(item => item.registered && (task !== 'translate' || item.translation_capable) && (task !== 'detect' || item.language_detection_capable));
     model = options.find(item => item.model_id === preferred)?.model_id ?? '';
   }
   function taskChanged(event: Event) {
@@ -49,7 +51,7 @@
   }
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (!file || !model || submitting) return;
+    if (!file || !model || submitting || languageRequired) return;
     submitting = true;
     error = '';
     success = '';
@@ -76,10 +78,10 @@
     <label class="file-field"><span>Audio or video file</span><input bind:this={fileInput} type="file" accept="audio/*,video/*" onchange={fileChanged} required disabled={loading || submitting} /><small>{settings ? `Maximum upload size: ${settings.max_upload_mb} MB.` : 'Select a file from your device.'}</small></label>
     <div class="fields">
       <label><span>Task</span><select bind:value={task} onchange={taskChanged} disabled={loading || submitting}><option value="transcribe">Transcribe</option><option value="translate">Translate to English</option><option value="detect">Detect language</option></select><small>{task === 'translate' ? 'Translation output is always in English.' : task === 'detect' ? 'Identify the language spoken in the file.' : 'Keep the spoken language in the transcript.'}</small></label>
-      <label><span>Spoken language</span><input type="text" bind:value={language} disabled={loading || submitting} placeholder="auto" /><small>Use auto, a language name, or a Whisper language code.</small></label>
+      <label><span>Spoken language</span><input type="text" bind:value={language} disabled={loading || submitting} placeholder="auto" aria-invalid={languageRequired} /><small>{languageRequired ? 'This model requires an explicit spoken language.' : 'Use auto, a language name, or a Whisper language code.'}</small></label>
       <label class="model"><span>Model</span><select bind:value={model} disabled={loading || submitting || available.length === 0} required><option value="" disabled>Choose a model</option>{#each available as item (item.model_id)}<option value={item.model_id}>{item.name}</option>{/each}</select><small>{available.length === 0 && !loading ? task === 'translate' ? 'No registered translation-capable model. Install and register one in Models.' : 'No registered model is available. Install and register one in Models.' : !loading && !model ? 'The configured default is unavailable for this task. Choose a registered model or update the default in Settings.' : task === 'translate' ? 'Turbo models cannot translate and are not listed.' : 'Only registered models are listed.'}</small></label>
     </div>
-    <div class="footer"><p>Loading a speech model may unload another model in the engine.</p><button class="primary" type="submit" disabled={loading || submitting || !settings || !file || !model}>{submitting ? 'Submitting…' : 'Submit job'}</button></div>
+    <div class="footer"><p>Loading a speech model may unload another model in the engine.</p><button class="primary" type="submit" disabled={loading || submitting || !settings || !file || !model || languageRequired}>{submitting ? 'Submitting…' : 'Submit job'}</button></div>
   </form>
 </section>
 

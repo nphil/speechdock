@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 — 2026-11-01
+
+- Import supported speech-model files by upload or direct public HTTPS URL, with optional expected SHA-256 and size, bounded streaming transfers, cancellation, restart recovery and explicit native registration. Preserve unrelated models and never load a model simply because it was imported.
+- Identify supported Whisper GGML and legacy Parakeet/Canary GGUF formats from their contents; reject unsupported architectures and malformed files. Distinguish a supplied checksum match from a locally calculated hash.
+- Package a pinned CUDA 12 CrispASR runtime for on-demand execution inside the existing llama-swap container, with verified immutable assets and a fail-closed GPU launcher. Parakeet uses its native word timing; Canary transcription uses explicitly labelled DTW estimates. Parakeet CUDA execution is verified on the Tesla P40; model quality and speed must be judged on representative speech, not hardware compatibility alone. Canary translation is not enabled.
+- Keep language detection on its own compatible model when choosing a transcription backend without language identification.
+- Add optional English CPU forced alignment for Marquee using exact selected Plex media/audio/subtitle identities, read-only server-side media mappings and a pinned ONNX model. Preserve authored cue bounds and retain estimated reveal for unsupported or mismatched speech; reject obsolete playback and seek generations. This source integration has local fixture proof, not production Plex or TV deployment proof.
+
 ## 0.1.3 — 2026-11-01
 
 - Accept valid subtitle cues when Whisper’s unused internal subword estimates overlap or run backward. Validate the actual cue endpoints, preserve every recognized segment and keep strict final subtitle and physical-audio timing checks.

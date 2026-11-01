@@ -12,6 +12,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -22,6 +24,7 @@ from .jobs import JobConflict, JobManager, JobNotFound, QueueFull, UploadTooLarg
 from .languages import normalize_language
 from .models import ModelError, ModelManager
 from .store import Store
+from .alignment import alignment_lifespan, attach_alignment_routes
 
 DATA_DIR = Path(os.environ.get("SPDOCK_DATA_DIR", "/data"))
 FRONTEND_DIR = Path(os.environ.get("SPDOCK_FRONTEND_DIR", "ui/dist"))
@@ -55,6 +58,7 @@ class SettingsPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     engine_url: str | None = None
     transcription_model: str | None = None
+    detection_model: str | None = None
     translation_model: str | None = None
     inference_timeout_seconds: int | None = Field(default=None, ge=1, le=86400, strict=True)
     connect_timeout_seconds: int | None = Field(default=None, ge=1, le=300, strict=True)
@@ -77,13 +81,25 @@ class RegisterBody(BaseModel):
     confirm_reload: bool = False
 
 
+class ImportBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    source: str
+    url: str | None = None
+    expected_sha256: str | None = None
+    expected_size_bytes: int | None = Field(default=None, strict=True)
+    source_filename: str | None = None
+
+
 async def model_for(app: FastAPI, model: str, task: str) -> dict:
     items = await app.state.models.list_models()
     item = next((item for item in items if item["model_id"] == model), None)
     if item is None or not item["registered"]:
         raise ValueError(f"Model '{model}' is not available. Install and register it in Models first.")
     if task == "translate" and not item["translation_capable"]:
-        raise ValueError(f"Model '{model}' cannot translate. Select a translation-capable Whisper model.")
+        raise ValueError(f"Model '{model}' cannot translate. Select a translation-capable model.")
+    if task == "detect" and not item.get("language_detection_capable", False):
+        raise ValueError(f"Model '{model}' cannot detect language. Select a detection-capable model.")
     return item
 
 
@@ -99,9 +115,11 @@ async def lifespan(app: FastAPI):
     app.state.store, app.state.models = store, models
 
     async def process(job: dict, path: Path, progress):
-        await model_for(app, job["model"], job["task"])
+        item = await model_for(app, job["model"], job["task"])
         settings = store.get_settings()
-        engine = Engine(settings)
+        if item.get("requires_language") and job["language"] == "auto":
+            raise ValueError("This model requires an explicit source language.")
+        engine = Engine(settings, runtime=item["runtime"], architecture=item["architecture"])
         pcm = path.with_suffix(".pcm")
         try:
             duration = await normalize_audio(path, pcm, job.get("encode", True))
@@ -140,7 +158,8 @@ async def lifespan(app: FastAPI):
     app.state.jobs = jobs
     await jobs.start()
     try:
-        yield
+        async with alignment_lifespan(app):
+            yield
     finally:
         await jobs.close()
         await models.close()
@@ -148,6 +167,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SpeechDock", version=__version__, lifespan=lifespan)
+attach_alignment_routes(app)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path == "/api/models/imports":
+        return JSONResponse({"detail": "Invalid import request. Check the supplied fields."}, status_code=422)
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.middleware("http")
@@ -231,7 +258,7 @@ async def patch_settings(request: Request, patch: SettingsPatch):
     changes = patch.model_dump(exclude_unset=True)
     if any(value is None for value in changes.values()):
         raise HTTPException(422, "Settings cannot be null")
-    for key, task in (("transcription_model", "transcribe"), ("translation_model", "translate")):
+    for key, task in (("transcription_model", "transcribe"), ("translation_model", "translate"), ("detection_model", "detect")):
         if key in changes:
             try:
                 await model_for(request.app, changes[key], task)
@@ -243,7 +270,35 @@ async def patch_settings(request: Request, patch: SettingsPatch):
 @app.get("/api/models")
 async def get_models(request: Request):
     manager = request.app.state.models
-    return {"items": await manager.list_models(), "downloads": await manager.downloads()}
+    return {"items": await manager.list_models(), "downloads": await manager.downloads(), "runtimes": manager.runtimes}
+
+
+@app.post("/api/models/imports", status_code=202)
+async def create_model_import(request: Request, body: ImportBody):
+    try:
+        return await request.app.state.models.create_import(**body.model_dump())
+    except ModelError as exc:
+        if body.url:
+            raise HTTPException(exc.status_code, "Could not start import. Check the source and import settings.") from None
+        raise
+
+
+@app.put("/api/models/{catalog_id}/upload")
+async def upload_model(request: Request, catalog_id: str):
+    length = request.headers.get("content-length")
+    if length is not None:
+        try:
+            length = int(length)
+            if length < 0:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(400, "Invalid Content-Length") from None
+    return await request.app.state.models.receive_upload(catalog_id, request.stream(), content_length=length)
+
+
+@app.delete("/api/models/{catalog_id}/import")
+async def remove_model_import(request: Request, catalog_id: str, confirm: bool = False):
+    return await request.app.state.models.remove_import(catalog_id, confirm=confirm)
 
 
 @app.post("/api/models/{catalog_id}/download")
@@ -284,8 +339,10 @@ async def submit(request: Request, upload: UploadFile, source: str, task: str, l
     settings = request.app.state.store.get_settings()
     try:
         language = normalize_language(language or settings["default_language"])
-        model = model or settings["translation_model" if task == "translate" else "transcription_model"]
-        await model_for(request.app, model, task)
+        model = model or settings[{"translate": "translation_model", "detect": "detection_model", "transcribe": "transcription_model"}[task]]
+        item = await model_for(request.app, model, task)
+        if item.get("requires_language") and language == "auto":
+            raise ValueError("This model requires an explicit source language.")
         return await request.app.state.jobs.submit(upload, source=source, filename=clean_filename(filename or upload.filename), task=task, language=language, model=model, encode=encode)
     except ValueError as exc:
         if isinstance(exc, (JobConflict, JobNotFound, QueueFull, UploadTooLarge, ModelError)):

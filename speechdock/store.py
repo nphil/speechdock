@@ -15,6 +15,7 @@ def utcnow() -> str:
 DEFAULT_SETTINGS = {
     "engine_url": os.environ.get("SPDOCK_ENGINE_URL", "https://llama.nateshome.net").rstrip("/"),
     "transcription_model": "whisper-1",
+    "detection_model": "whisper-1",
     "translation_model": "speechdock-large-v3",
     "inference_timeout_seconds": 3600,
     "connect_timeout_seconds": 10,
@@ -42,6 +43,10 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, created_at);
         """)
+        self.db.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES ('detection_model', COALESCE((SELECT value FROM settings WHERE key='transcription_model'), ?))",
+            (json.dumps(DEFAULT_SETTINGS["detection_model"]),),
+        )
         self.db.commit()
 
     def get_settings(self) -> dict:

@@ -20,6 +20,7 @@
   const message = (reason: unknown) => reason instanceof Error ? reason.message : 'Something went wrong. Please try again.';
   $: transcriptionModels = models.filter(model => model.registered);
   $: translationModels = models.filter(model => model.registered && model.translation_capable);
+  $: detectionModels = models.filter(model => model.registered && model.language_detection_capable);
 
   function applyTheme(value: 'system' | 'light' | 'dark') {
     theme = value;
@@ -30,6 +31,10 @@
 
   async function save() {
     if (!settings || !original || saving) return;
+    const defaultModel = models.find(model => model.model_id === settings?.transcription_model);
+    if (defaultModel?.requires_language && (!settings.default_language.trim() || settings.default_language.trim().toLowerCase() === 'auto')) {
+      error = 'The default transcription model needs an explicit default language.'; return;
+    }
     const patch: Partial<Settings> = {};
     for (const key of Object.keys(settings) as (keyof Settings)[]) {
       if (settings[key] !== original[key]) Object.assign(patch, { [key]: settings[key] });
@@ -106,6 +111,13 @@
               {#each translationModels as model (model.id)}<option value={model.model_id}>{model.name}</option>{/each}
             </select>
             <span>Translation needs a registered full Whisper model; Turbo models do not support it.</span>
+          </label>
+          <label>Language detection model
+            <select bind:value={settings.detection_model} disabled={!!modelError}>
+              {#if !detectionModels.some(model => model.model_id === settings?.detection_model)}<option value={settings.detection_model}>{settings.detection_model} (not currently available)</option>{/if}
+              {#each detectionModels as model (model.id)}<option value={model.model_id}>{model.name}</option>{/each}
+            </select>
+            <span>Only registered models capable of detecting language are listed.</span>
           </label>
           <label>Default language<input required type="text" bind:value={settings.default_language} spellcheck="false" /><span>Use auto for detection, or a supported language name or code, such as English or en.</span></label>
           <div class="columns"><label>Maximum upload <span>MB</span><input type="number" required min="1" max="10240" step="1" bind:value={settings.max_upload_mb} /></label><label>History retention <span>days</span><input type="number" required min="1" max="3650" step="1" bind:value={settings.retention_days} /></label></div>
