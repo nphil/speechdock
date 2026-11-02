@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from speechdock.audio import parse_srt
-from speechdock.engine import Engine, EngineError, _canary_word_cues, _native_word_cues
+from speechdock.engine import Engine, EngineError, _canary_word_cues, _native_word_cues, _parakeet_token_cues
 
 
 def wav(seconds=60):
@@ -20,6 +20,71 @@ def wav(seconds=60):
 def payload(words):
     text = " ".join(w["word"] for w in words)
     return {"text": text, "segments": [{"text": text, "words": words}]}
+
+
+def native_payload(text, tokens):
+    return {"backend": "parakeet", "text": text, "segments": [{"text": text, "tokens": [
+        {"text": token, "t0": start, "t1": end} for token, start, end in tokens
+    ]}]}
+
+
+@pytest.mark.parametrize("text,tokens,expected", [
+    ("Skills.", [(" Sk", 5360, 5520), ("ill", 5760, 6000), ("s", 6000, 6320), (".", 22640, 22960)], (5360, 6320)),
+    ("Skills.", [(" Sk", 4400, 4560), ("ill", 4560, 4800), ("s", 4800, 4960), (".", 20000, 20320)], (4400, 4960)),
+    ("can't", [(" can", 100, 200), ("'", 1000, 1100), ("t", 200, 300)], (100, 300)),
+    ("pre-test", [(" pre", 100, 200), ("-", 1000, 1100), ("test", 200, 300)], (100, 300)),
+    ("“Hi”", [("“", 0, 10), ("Hi", 100, 200), ("”", 1000, 1100)], (100, 200)),
+    ("5+3", [(" 5", 100, 200), ("+", 200, 300), ("3", 300, 400)], (100, 400)),
+    ("zero", [(" ze", 100, 100), ("ro", 100, 200)], (100, 200)),
+    ("hello .", [(" hello", 100, 200), (" ", 300, 300), (".", 900, 1000)], (100, 200)),
+    ("hello '", [(" hello", 100, 200), (" ", 300, 300), ("'", 900, 1000)], (100, 200)),
+    ("zero", [(" ze", 100, 150), ("r", 150, 150), ("o", 150, 200)], (100, 200)),
+])
+def test_parakeet_native_lexical_bounds_and_complete_text(text, tokens, expected):
+    cues = _parakeet_token_cues(native_payload(text, tokens), 28)
+    assert len(cues) == 1
+    assert (cues[0].start_ms, cues[0].end_ms, cues[0].text) == (*expected, text)
+
+
+@pytest.mark.parametrize("tokens", [
+    [("Alpha", 0, 300), (" '", 1900, 2000), ("be", 1400, 1500), ("ta", 1500, 1600)],
+    [(" Alpha", 0, 300), (" ", 300, 300), ("'", 1900, 2000), ("be", 1400, 1500), ("ta", 1500, 1600)],
+])
+def test_parakeet_native_one_prefix_and_standalone_space_boundaries(tokens):
+    cues = _parakeet_token_cues(native_payload("Alpha 'beta", tokens), 2)
+    assert [(cue.text, cue.start_ms, cue.end_ms) for cue in cues] == [("Alpha", 0, 300), ("'beta", 1400, 1600)]
+
+
+def test_parakeet_closing_punctuation_preserves_pending_word_boundary():
+    data = native_payload("hello . next", [(" hello", 100, 200), (" ", 200, 200),
+                                             (".", 900, 1000), ("next", 1400, 1600)])
+    cues = _parakeet_token_cues(data, 2)
+    assert [(cue.text, cue.start_ms, cue.end_ms) for cue in cues] == [("hello .", 100, 200), ("next", 1400, 1600)]
+
+
+@pytest.mark.parametrize("data,duration", [
+    (native_payload("!", [("!", 0, 100)]), 1),
+    (native_payload("word", [(" word", 100, 100)]), 1),
+    (native_payload("word", [(" word", 200, 100)]), 1),
+    (native_payload("word", [(" word", 0, 1001)]), 1),
+    (native_payload("word", [(" word", True, 100)]), 1),
+    (native_payload("word", [(" word", 0, float("nan"))]), 1),
+    (native_payload("word", [(" wor", 0, 100)]), 1),
+    (native_payload("word", [(" wo", 200, 300), ("rd", 100, 400)]), 1),
+    (native_payload("word", [(" wo", 0, 200), ("rd", 100, 300)]), 1),
+    ({"backend": "parakeet", "text": "word", "segments": [{"text": "word", "tokens": [{"text": "word", "t0": 0}]}]}, 1),
+    (native_payload("word", [(" word", 0, 8000)]), 9),
+    ({"backend": "canary", "text": "word", "segments": []}, 1),
+    ({"backend": "parakeet", "text": "word", "segments": [{"text": "word"}]}, 1),
+    ({"backend": "parakeet", "text": "word omitted", "segments": [{"text": "word", "tokens": [{"text": " word", "t0": 0, "t1": 100}]}]}, 1),
+])
+def test_parakeet_native_rejects_missing_text_and_invalid_timings(data, duration):
+    with pytest.raises(ValueError):
+        _parakeet_token_cues(data, duration)
+
+
+def test_parakeet_native_empty_segment_is_empty():
+    assert _parakeet_token_cues({"backend": "parakeet", "text": "", "segments": [{"text": ""}]}, 1) == []
 
 
 def test_native_words_split_readably_without_losing_text():
@@ -123,14 +188,16 @@ def test_crisp_protocol(monkeypatch, architecture, language):
     requests = []
     def handler(request):
         requests.append(request)
-        return httpx.Response(200, json=payload([{"word": "Hola", "start": 0, "end": 0.96}]))
+        data = (native_payload("Hola", [(" Hola", 0, 960)]) if architecture == "parakeet"
+                else payload([{"word": "Hola", "start": 0, "end": 0.96}]))
+        return httpx.Response(200, json=data)
     original = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
     engine = Engine({"engine_url": "http://engine"}, runtime="crispasr", architecture=architecture)
     cues = parse_srt(asyncio.run(engine.transcribe(wav(1), "owned", language, "transcribe")))
     assert cues[0].text == "Hola"
     request = requests[0]
-    assert request.url.path == "/v1/audio/transcriptions"
+    assert request.url.path == ("/upstream/owned/inference" if architecture == "parakeet" else "/v1/audio/transcriptions")
     body = request.content
     for field in ("require_word_timestamps", "no_auto_aligner", "lid_backend", "response_format"):
         assert f'name="{field}"'.encode() in body

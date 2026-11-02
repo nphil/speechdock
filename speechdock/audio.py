@@ -163,21 +163,41 @@ def _speech_windows(probabilities, sample_count: int):
             for start, end in windows]
 
 
-def speech_wav_chunks(wav_data: bytes, detector: SpeechDetector):
-    """Return bounded speech WAVs with offsets relative to one 300-second WAV."""
+def _wav_pcm(wav_data: bytes) -> bytes:
     with wave.open(io.BytesIO(wav_data), "rb") as wav:
         if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getcomptype()) != (1, 2, RATE, "NONE"):
             raise ValueError("Expected mono 16 kHz 16-bit PCM WAV")
         if wav.getnframes() > MAX_CHUNK_SECONDS * RATE:
             raise ValueError("Speech detection chunk exceeds 300 seconds")
-        pcm = wav.readframes(wav.getnframes())
+        return wav.readframes(wav.getnframes())
+
+
+def _pcm_wav(pcm: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+        wav.writeframes(pcm)
+    return buffer.getvalue()
+
+
+def audio_wav_chunks(wav_data: bytes):
+    """Keep all non-digital-silent audio in bounded, non-overlapping WAVs."""
+    pcm = _wav_pcm(wav_data)
+    chunk_bytes = 28 * BYTES_PER_SECOND
+    chunks = []
+    for start in range(0, len(pcm), chunk_bytes):
+        part = pcm[start:start + chunk_bytes]
+        if any(part):
+            chunks.append((start / BYTES_PER_SECOND, _pcm_wav(part)))
+    return chunks
+
+
+def speech_wav_chunks(wav_data: bytes, detector: SpeechDetector):
+    """Return bounded speech WAVs with offsets relative to one 300-second WAV."""
+    pcm = _wav_pcm(wav_data)
     chunks = []
     for start, end in _speech_windows(detector.probabilities(pcm), len(pcm) // 2):
-        buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav:
-            wav.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
-            wav.writeframes(pcm[start * 2:end * 2])
-        chunks.append((start / RATE, buffer.getvalue()))
+        chunks.append((start / RATE, _pcm_wav(pcm[start * 2:end * 2])))
     return chunks
 
 

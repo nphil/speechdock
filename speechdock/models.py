@@ -231,7 +231,7 @@ class ModelManager:
             if fd >= 0:
                 os.close(fd)
 
-    async def _engine_ids(self):
+    async def _engine_models(self):
         settings = self.settings_provider()
         url = settings.get("engine_url", "https://llama.nateshome.net").rstrip("/")
         if url.endswith("/v1"):
@@ -246,19 +246,36 @@ class ModelManager:
                 body = response.json()
                 if not isinstance(body, dict) or not isinstance(body.get("data"), list):
                     return None
-                ids = set()
-                for item in body["data"]:
-                    if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-                        continue
-                    ids.add(item["id"])
-                    meta = item.get("meta")
-                    swap = meta.get("llamaswap") if isinstance(meta, dict) else None
-                    aliases = swap.get("aliases") if isinstance(swap, dict) else None
-                    if isinstance(aliases, list):
-                        ids.update(alias for alias in aliases if isinstance(alias, str))
-                return ids
+                return body["data"]
         except (httpx.HTTPError, ValueError, TypeError):
             return None
+
+    async def _engine_ids(self):
+        items = await self._engine_models()
+        if items is None:
+            return None
+        ids = set()
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            ids.add(item["id"])
+            meta = item.get("meta")
+            swap = meta.get("llamaswap") if isinstance(meta, dict) else None
+            aliases = swap.get("aliases") if isinstance(swap, dict) else None
+            if isinstance(aliases, list):
+                ids.update(alias for alias in aliases if isinstance(alias, str))
+        return ids
+
+    async def _engine_revision(self, model_id):
+        items = await self._engine_models()
+        if items is None:
+            return None
+        for item in items:
+            if isinstance(item, dict) and item.get("id") == model_id:
+                meta = item.get("meta")
+                swap = meta.get("llamaswap") if isinstance(meta, dict) else None
+                return swap.get("speechdock_revision") if isinstance(swap, dict) else None
+        return None
 
     async def list_models(self):
         ids = await self._engine_ids()
@@ -270,7 +287,7 @@ class ModelManager:
                    "requires_language": False, "checksum_status": "pending", "runtime_ready": ids is not None and "whisper-1" in ids,
                    "runtime_error": None,
                    "installed": False, "verified": False, "registered": ids is not None and "whisper-1" in ids,
-                   "read_only": True, "download": None, "can_register": False,
+                   "read_only": True, "download": None, "can_register": False, "keep_loaded": None,
                    "warning": "Shared model; file ownership and integrity are not managed by SpeechDock."}]
         for entry in (*CATALOG.values(), *self._state["imports"].values()):
             try:
@@ -289,6 +306,8 @@ class ModelManager:
                 "runtime_ready": bool(runtime_info.get("available")), "runtime_error": runtime_info.get("error"),
                 "installed": entry["id"] in self._state["files"], "verified": verified,
                 "registered": ids is not None and entry["model_id"] in ids,
+                "keep_loaded": (json.loads(self._state["registrations"][entry["id"]]).get("ttl") == 0
+                                if entry["id"] in self._state["registrations"] else None),
                 "read_only": False, "download": dict(download) if download else None,
                 "can_register": verified and bool(runtime_info.get("available")) and entry["id"] not in self._state["registrations"], "warning": WARNING})
         return result
@@ -453,39 +472,58 @@ class ModelManager:
             if group_name != "speechdock" and any(member in {self._entry(k)["model_id"] for k in owned} for member in group.get("members", [])):
                 raise ModelError(409, "An owned model belongs to another group")
 
-    async def _change_registration(self, ident, add, confirm_reload):
+    async def _change_registration(self, ident, add, confirm_reload, keep_loaded=None):
         entry = self._entry(ident)
-        if not confirm_reload:
-            raise ModelError(409, "Confirm the llama-swap reload before applying this change")
         async with self._lock:
+            owned = ident in self._state["registrations"]
+            if not add and not owned:
+                raise ModelError(409, "Model registration is not owned by SpeechDock")
+            before, yaml, config = self._load_config()
+            self._check_owned(config)
+            model_id = entry["model_id"]
+            if add and owned:
+                current_warm = config["models"][model_id].get("ttl") == 0
+                if keep_loaded is None or keep_loaded == current_warm:
+                    metadata = config["models"][model_id].get("metadata", {})
+                    revision = metadata.get("speechdock_revision") if isinstance(metadata, dict) else None
+                    if revision:
+                        if await self._engine_revision(model_id) != revision:
+                            raise ModelError(503, "Engine has not confirmed the registered model policy")
+                        return {"id": ident, "registered": True, "keep_loaded": current_warm, "warning": WARNING}
+                    if keep_loaded is None:
+                        return {"id": ident, "registered": True, "keep_loaded": current_warm, "warning": WARNING}
+            if not confirm_reload:
+                raise ModelError(409, "Confirm the llama-swap reload before applying this change")
             if add and not self.runtimes.get(entry.get("runtime", "whisper.cpp"), {}).get("available"):
                 raise ModelError(503, "The required model runtime is unavailable")
             if add and not await asyncio.to_thread(self._verified, entry):
                 raise ModelError(409, "Install and verify the owned model before registering")
-            if add and ident in self._state["registrations"]:
-                raise ModelError(409, "Model is already registered")
-            if not add and ident not in self._state["registrations"]:
-                raise ModelError(409, "Model registration is not owned by SpeechDock")
-            before, yaml, config = self._load_config()
-            self._check_owned(config)
             previous_registrations = dict(self._state["registrations"])
             previous_group = self._state["group"]
             models = config["models"]
-            model_id = entry["model_id"]
             if add:
-                if model_id in models or any(model_id in (m.get("aliases") or []) for m in models.values() if isinstance(m, dict)):
-                    raise ModelError(409, "Model ID or alias already exists")
-                if any(model_id in g.get("members", []) for g in config.get("groups", {}).values()):
-                    raise ModelError(409, "Model ID is already in a group")
-                models[model_id] = self._definition(entry)
+                if not owned:
+                    if model_id in models or any(model_id in (m.get("aliases") or []) for m in models.values() if isinstance(m, dict)):
+                        raise ModelError(409, "Model ID or alias already exists")
+                    if any(model_id in g.get("members", []) for g in config.get("groups", {}).values()):
+                        raise ModelError(409, "Model ID is already in a group")
+                    models[model_id] = self._definition(entry)
+                if keep_loaded is not None:
+                    models[model_id]["ttl"] = 0 if keep_loaded else 180
+                revision = uuid.uuid4().hex
+                metadata = models[model_id].setdefault("metadata", {})
+                if not isinstance(metadata, dict):
+                    raise ModelError(409, "Unsupported owned model metadata")
+                metadata["speechdock_revision"] = revision
             else:
                 del models[model_id]
             groups = config.setdefault("groups", {})
-            members = [self._entry(k)["model_id"] for k in self._state["registrations"] if k != ident]
-            if add:
+            members = [self._entry(k)["model_id"] for k in self._state["registrations"] if add or k != ident]
+            if add and not owned:
                 members.append(model_id)
             if members:
-                groups["speechdock"] = {"swap": True, "exclusive": True, "persistent": False, "members": members}
+                warm = any(models[member].get("ttl") == 0 for member in members)
+                groups["speechdock"] = {"swap": not warm, "exclusive": not warm, "persistent": warm, "members": members}
             else:
                 del groups["speechdock"]
             stream = io.StringIO()
@@ -539,8 +577,12 @@ class ModelManager:
             verified = False
             for _ in range(10):
                 await asyncio.sleep(1)
-                ids = await self._engine_ids()
-                if ids is not None and ((model_id in ids) == add):
+                if add:
+                    confirmed = await self._engine_revision(model_id) == revision
+                else:
+                    ids = await self._engine_ids()
+                    confirmed = ids is not None and model_id not in ids
+                if confirmed:
                     verified = True
                     break
             if not verified:
@@ -552,10 +594,10 @@ class ModelManager:
                     self._save()
                     raise ModelError(503, "Engine did not confirm the reload; configuration restored")
                 raise ModelError(409, "Engine did not confirm reload and configuration changed externally; no rollback was attempted")
-            return {"id": ident, "registered": add, "warning": WARNING}
+            return {"id": ident, "registered": add, "keep_loaded": models[model_id].get("ttl") == 0 if add else None, "warning": WARNING}
 
-    async def register(self, catalog_id, confirm_reload=False):
-        return await self._change_registration(catalog_id, True, confirm_reload)
+    async def register(self, catalog_id, confirm_reload=False, keep_loaded=None):
+        return await self._change_registration(catalog_id, True, confirm_reload, keep_loaded)
 
     async def unregister(self, catalog_id, confirm_reload=False):
         return await self._change_registration(catalog_id, False, confirm_reload)

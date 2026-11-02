@@ -90,6 +90,7 @@ async def test_no_speech_jobs_never_call_engine(tmp_path, monkeypatch, task):
     monkeypatch.setattr(application, "SpeechDetector", lambda path: object())
     monkeypatch.setattr(application, "iter_wav_chunks", lambda path: iter([(0, b"wav")]))
     monkeypatch.setattr(application, "speech_wav_chunks", lambda wav, detector: [])
+    monkeypatch.setattr(application, "audio_wav_chunks", lambda wav: [])
     async with application.lifespan(application.app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application.app), base_url="http://test") as client:
             response = await client.post("/api/jobs", data={"task": task}, files={"file": ("silent.wav", b"audio", "audio/wav")})
@@ -108,7 +109,8 @@ async def test_no_speech_jobs_never_call_engine(tmp_path, monkeypatch, task):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("end,valid", [("01,000", True), ("02,001", False)])
-async def test_voice_windows_keep_original_offsets(tmp_path, monkeypatch, end, valid):
+@pytest.mark.parametrize("task", ["transcribe", "translate"])
+async def test_voice_windows_keep_original_offsets(tmp_path, monkeypatch, end, valid, task):
     monkeypatch.setattr(application, "DATA_DIR", tmp_path / "data")
     monkeypatch.setenv("SPDOCK_MODELS_DIR", str(tmp_path / "models"))
     monkeypatch.setenv("SPDOCK_LLAMA_CONFIG", str(tmp_path / "config.yaml"))
@@ -121,10 +123,10 @@ async def test_voice_windows_keep_original_offsets(tmp_path, monkeypatch, end, v
     class Engine:
         def __init__(self, settings, *, runtime, architecture):
             pass
-        async def transcribe(self, wav, model, language, task):
+        async def transcribe(self, wav, model, language, current_task):
+            assert current_task == task
             calls.append(wav)
             return f"1\n00:00:00,500 --> 00:00:{end}\nHello\n"
-    detector = object()
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
         wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
@@ -133,15 +135,14 @@ async def test_voice_windows_keep_original_offsets(tmp_path, monkeypatch, end, v
     monkeypatch.setattr(application, "normalize_audio", normalize)
     monkeypatch.setattr(application, "model_for", model_for)
     monkeypatch.setattr(application, "Engine", Engine)
-    monkeypatch.setattr(application, "SpeechDetector", lambda path: detector)
+    monkeypatch.setattr(application, "SpeechDetector", lambda path: pytest.fail("Subtitles must not require VAD"))
     monkeypatch.setattr(application, "iter_wav_chunks", lambda path: iter([(0, b"first"), (300, b"second")]))
-    def windows(wav, current):
-        assert current is detector
+    def windows(wav):
         return [] if wav == b"first" else [(12.25, voice)]
-    monkeypatch.setattr(application, "speech_wav_chunks", windows)
+    monkeypatch.setattr(application, "audio_wav_chunks", windows)
     async with application.lifespan(application.app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application.app), base_url="http://test") as client:
-            response = await client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")})
+            response = await client.post("/api/jobs", data={"task": task}, files={"file": ("clip.wav", b"audio", "audio/wav")})
             job_id = response.json()["id"]
             job = await application.app.state.jobs.wait(job_id)
             if valid:
@@ -165,7 +166,7 @@ async def test_cancel_during_voice_detection_cleans_temporary_audio(tmp_path, mo
         return 10
     async def model_for(*args):
         return {"runtime": "whisper.cpp", "architecture": "whisper"}
-    def windows(wav, detector):
+    def windows(wav):
         started.set()
         assert release.wait(10)
         return [(0, b"voice")]
@@ -177,9 +178,9 @@ async def test_cancel_during_voice_detection_cleans_temporary_audio(tmp_path, mo
     monkeypatch.setattr(application, "normalize_audio", normalize)
     monkeypatch.setattr(application, "model_for", model_for)
     monkeypatch.setattr(application, "Engine", Engine)
-    monkeypatch.setattr(application, "SpeechDetector", lambda path: object())
+    monkeypatch.setattr(application, "SpeechDetector", lambda path: pytest.fail("Subtitles must not require VAD"))
     monkeypatch.setattr(application, "iter_wav_chunks", lambda path: iter([(0, b"wav")]))
-    monkeypatch.setattr(application, "speech_wav_chunks", windows)
+    monkeypatch.setattr(application, "audio_wav_chunks", windows)
     async with application.lifespan(application.app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application.app), base_url="http://test") as client:
             response = await client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")})

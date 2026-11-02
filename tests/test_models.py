@@ -49,7 +49,7 @@ def upstream():
             if self.path == "/v1/models":
                 if self.config is not None:
                     models = YAML(typ="safe").load(self.config.read_text())["models"]
-                    data = [{"id": ident, "meta": {"llamaswap": {"aliases": definition.get("aliases", [])}}}
+                    data = [{"id": ident, "meta": {"llamaswap": {**definition.get("metadata", {}), "aliases": definition.get("aliases", [])}}}
                             for ident, definition in models.items()]
                 else:
                     data = [{"id": ident} for ident in self.ids]
@@ -322,3 +322,114 @@ async def test_restart_recovers_only_owned_interrupted_publication(manager, phas
                 assert not final.exists()
     finally:
         await restarted.close()
+
+
+async def test_register_keep_loaded_transaction_via_api(manager, monkeypatch, tmp_path):
+    import httpx
+    from speechdock.app import app
+
+    instance, tiny, config, _, _ = manager
+    large = copy.deepcopy(CATALOG["large-v3"])
+    large.update(url=tiny["url"], size_bytes=tiny["size_bytes"], sha256=tiny["sha256"])
+    monkeypatch.setitem(CATALOG, "large-v3", large)
+    for ident in ("tiny", "large-v3"):
+        await instance.install(ident)
+        assert (await wait_for_download(instance, ident))["status"] in {"completed", "complete"}
+    downloads = copy.deepcopy(await instance.downloads())
+    validator = tmp_path / "validator"
+    validator.write_text("#!/bin/sh\nexit 0\n")
+    validator.chmod(0o755)
+    instance.validator = validator
+    instance.runtimes["whisper.cpp"] = {"available": True}
+    monkeypatch.setattr(app.state, "models", instance, raising=False)
+
+    async def ids():
+        return set(YAML(typ="safe").load(config.read_text())["models"])
+
+    async def no_wait(_seconds):
+        pass
+
+    monkeypatch.setattr(instance, "_engine_ids", ids)
+    monkeypatch.setattr("speechdock.models.asyncio.sleep", no_wait)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        url = "/api/models/tiny/register"
+        for invalid in ("true", 1, None, [], {}):
+            response = await client.post(url, json={"confirm_reload": True, "keep_loaded": invalid})
+            assert response.status_code == 422
+        assert (await client.post(url, json={"confirm_reload": "true"})).status_code == 422
+        assert (await client.post(url, json={"keep_loaded": True})).status_code == 409
+        response = await client.post(url, json={"confirm_reload": True, "keep_loaded": True})
+        assert response.status_code == 200 and response.json()["keep_loaded"] is True
+        initial = config.read_bytes()
+        state = instance.state_path.read_bytes()
+        for body in ({"keep_loaded": True}, {}, {"confirm_reload": True, "keep_loaded": True}):
+            response = await client.post(url, json=body)
+            assert response.status_code == 200 and response.json()["keep_loaded"] is True
+            assert config.read_bytes() == initial and instance.state_path.read_bytes() == state
+        assert (await client.post(url, json={"keep_loaded": False})).status_code == 409
+        assert (await client.post(url, json={"confirm_reload": True, "keep_loaded": False})).json()["keep_loaded"] is False
+        parsed = YAML(typ="safe").load(config.read_text())
+        assert parsed["models"][tiny["model_id"]]["ttl"] == 180
+        assert parsed["groups"]["speechdock"]["exclusive"] is True
+        assert (await client.post(url, json={"confirm_reload": True, "keep_loaded": True})).json()["keep_loaded"] is True
+        response = await client.post("/api/models/large-v3/register", json={"confirm_reload": True})
+        assert response.status_code == 200 and response.json()["keep_loaded"] is False
+        parsed = YAML(typ="safe").load(config.read_text())
+        assert parsed["models"][tiny["model_id"]]["ttl"] == 0
+        assert parsed["models"][large["model_id"]]["ttl"] == 180
+        assert parsed["groups"]["speechdock"] == {"swap": False, "exclusive": False, "persistent": True, "members": [tiny["model_id"], large["model_id"]]}
+        original = YAML(typ="safe").load(CONFIG)
+        assert parsed["groups"]["daily"] == original["groups"]["daily"]
+        assert parsed["hooks"] == original["hooks"]
+        listed = (await client.get("/api/models")).json()["items"]
+        assert next(x for x in listed if x["id"] == "tiny")["keep_loaded"] is True
+        assert next(x for x in listed if x["id"] == "large-v3")["keep_loaded"] is False
+        assert (await client.delete("/api/models/tiny/registration?confirm_reload=true")).status_code == 200
+        parsed = YAML(typ="safe").load(config.read_text())
+        assert parsed["groups"]["speechdock"] == {"swap": True, "exclusive": True, "persistent": False, "members": [large["model_id"]]}
+        assert await instance.downloads() == downloads
+
+        before_config = config.read_bytes()
+        before_state = instance.state_path.read_bytes()
+        before_owned = copy.deepcopy(instance._state)
+        stale_models = await instance._engine_models()
+        async def stale_engine():
+            return stale_models
+        monkeypatch.setattr(instance, "_engine_models", stale_engine)
+        async def no_engine():
+            return None
+        monkeypatch.setattr(instance, "_engine_ids", no_engine)
+        offline = (await client.get("/api/models")).json()["items"]
+        assert next(x for x in offline if x["id"] == "large-v3")["keep_loaded"] is False
+        assert next(x for x in offline if x["id"] == "tiny")["keep_loaded"] is None
+        response = await client.post("/api/models/large-v3/register", json={"confirm_reload": True, "keep_loaded": True})
+        assert response.status_code == 503
+        assert config.read_bytes() == before_config
+        assert instance.state_path.read_bytes() == before_state
+        assert instance._state == before_owned
+
+
+async def test_keep_loaded_rejects_external_definition(manager, monkeypatch, tmp_path):
+    instance, tiny, config, _, _ = manager
+    await instance.install("tiny")
+    assert (await wait_for_download(instance))["status"] in {"completed", "complete"}
+    validator = tmp_path / "validator"
+    validator.write_text("#!/bin/sh\nexit 0\n")
+    validator.chmod(0o755)
+    instance.validator = validator
+    instance.runtimes["whisper.cpp"] = {"available": True}
+    async def ids():
+        return {tiny["model_id"]}
+    async def no_wait(_seconds):
+        pass
+    monkeypatch.setattr(instance, "_engine_ids", ids)
+    monkeypatch.setattr("speechdock.models.asyncio.sleep", no_wait)
+    original = config.read_text()
+    config.write_text(original.replace("models:\n", f"models:\n  {tiny['model_id']}:\n    cmd: external\n", 1))
+    with pytest.raises(ModelError, match="Model ID or alias already exists"):
+        await instance.register("tiny", True, True)
+    config.write_text(original)
+    await instance.register("tiny", True, True)
+    config.write_text(config.read_text().replace("ttl: 0", "ttl: 12"))
+    with pytest.raises(ModelError, match="changed externally"):
+        await instance.register("tiny", True, False)

@@ -3,8 +3,9 @@
 import io
 import math
 import textwrap
+import unicodedata
 import wave
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -96,6 +97,80 @@ def _native_word_cues(payload: dict, duration: float) -> list[Cue]:
         raise ValueError("Speech engine segments do not preserve the complete transcript")
     return cues
 
+def _parakeet_token_cues(payload: dict, duration: float) -> list[Cue]:
+    """Use native lexical-token bounds while retaining every transcript character."""
+    if (not isinstance(payload, dict) or payload.get("backend") != "parakeet"
+            or not isinstance(payload.get("text"), str) or not isinstance(payload.get("segments"), list)):
+        raise ValueError("Invalid native Parakeet response")
+    segments = []
+    for segment in payload["segments"]:
+        if not isinstance(segment, dict) or not isinstance(segment.get("text"), str):
+            raise ValueError("Invalid native Parakeet segment")
+        text = segment["text"]
+        tokens = segment.get("tokens")
+        if tokens is None and not text.strip():
+            tokens = []
+        if not isinstance(tokens, list):
+            raise ValueError("Native Parakeet segment is missing tokens")
+        words = []
+        current = ""
+        leading = ""
+        first = last = None
+        boundary = False
+        token_text = []
+        for token in tokens:
+            if not isinstance(token, dict) or not isinstance(token.get("text"), str):
+                raise ValueError("Invalid native Parakeet token")
+            raw = token["text"]
+            if not raw:
+                continue
+            if raw.isspace():
+                boundary = True
+                continue
+            if raw.startswith(" "):
+                boundary = True
+                raw = raw[1:]
+            if not raw or any(char.isspace() for char in raw):
+                raise ValueError("Invalid native Parakeet token text")
+            token_text.append(raw)
+            start, end = token.get("t0"), token.get("t1")
+            if (any(type(t) not in (int, float) or not math.isfinite(t) for t in (start, end))
+                    or start < 0 or end < start or end > duration * 1000):
+                raise ValueError("Invalid native Parakeet token timings")
+            punct = all(unicodedata.category(char).startswith("P") for char in raw)
+            if punct:
+                opening = all(unicodedata.category(char) in {"Ps", "Pi"} or char in "\"'" for char in raw)
+                if first is None or leading or (boundary and opening):
+                    leading += raw
+                else:
+                    current += raw
+                continue
+            if boundary and first is not None:
+                words.append({"word": current, "start": first / 1000, "end": last / 1000})
+                current = ""
+                first = last = None
+            current += leading + raw
+            leading = ""
+            if first is None:
+                first = start
+            elif start < last:
+                raise ValueError("Invalid native Parakeet token timings")
+            last = end
+            boundary = False
+        if leading:
+            if first is None:
+                raise ValueError("Native Parakeet punctuation has no lexical timing")
+            current += leading
+        if token_text and first is None:
+            raise ValueError("Native Parakeet punctuation has no lexical timing")
+        if first is not None:
+            words.append({"word": current, "start": first / 1000, "end": last / 1000})
+        if "".join(token_text) != "".join(text.split()):
+            raise ValueError("Native Parakeet tokens do not preserve the complete transcript")
+        segments.append({"text": text, "words": words})
+    return _native_word_cues({"text": payload["text"], "segments": segments}, duration)
+
+
 def _canary_word_cues(payload: dict, duration: float) -> list[Cue]:
     """Group inseparable DTW cells; do not pretend these are CTC word onsets.
 
@@ -180,7 +255,10 @@ class Engine:
     async def _request(self, wav: bytes, model: str, fields: dict) -> httpx.Response:
         try:
             async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-                response = await client.post(self.url + "/v1/audio/transcriptions", data={"model": model, **fields}, files={"file": ("audio.wav", wav, "audio/wav")})
+                path = ("/upstream/" + quote(model, safe="") + "/inference"
+                        if (self.runtime, self.architecture) == ("crispasr", "parakeet")
+                        else "/v1/audio/transcriptions")
+                response = await client.post(self.url + path, data={"model": model, **fields}, files={"file": ("audio.wav", wav, "audio/wav")})
                 response.raise_for_status()
                 return response
         except httpx.HTTPStatusError as exc:
@@ -211,7 +289,7 @@ class Engine:
             with wave.open(io.BytesIO(wav), "rb") as source:
                 frames, rate = source.getnframes(), source.getframerate()
             if self.runtime == "crispasr":
-                adapter = _canary_word_cues if self.architecture == "canary" else _native_word_cues
+                adapter = _canary_word_cues if self.architecture == "canary" else _parakeet_token_cues
                 return render(adapter(response.json(), frames / rate), "srt")
             # Preserve Whisper segment text and aligned endpoints as before.
             cues = _aligned_cues(response.json())

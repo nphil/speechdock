@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2 — 2026-11-02
+
+- Preserve quiet film dialogue by sending every non-digitally-silent, bounded audio window for transcription and translation. Silero remains a language-detection aid, not a filter that can silently discard subtitle audio.
+- Read Parakeet native lexical token intervals through the model-specific llama-swap route. Preserve the complete transcript and punctuation without letting a delayed punctuation token turn a short word into a 16-second subtitle; keep strict completeness, timing, physical-audio and readability checks. No speech runtime rebuild or additional model is required.
+- Allow an owned model registration to explicitly retain its resident policy with `keep_loaded`. A warm member uses TTL 0 in a nonexclusive, persistent, nonswapping speech group; other members retain their idle timeout. Confirm configuration reloads using a fresh engine-visible revision, preserve unrelated models and roll back unacknowledged changes.
+- The retained 888.064-second Sintel prepared-audio check produced a complete 57-cue SRT from 33 real native requests. This verifies delivery and timing bounds, not a perfect transcript or independently measured acoustic accuracy.
+
 ## 0.2.1 — 2026-11-01
 
 - Preserve the raw independent CTC token sequence for acoustic scoring. Previously, normalized boundary or repeated separators could be discarded, falsely rejecting valid alignment as weak audio. Exact independent lexical equality and all token-score, source, hash, bounds and playback/seek epoch guards remain unchanged.

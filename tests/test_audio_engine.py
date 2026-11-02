@@ -144,6 +144,37 @@ def test_speech_windows_preserve_offsets_across_outer_chunks(tmp_path, monkeypat
         assert wav.getnframes() == 2 * audio.RATE
 
 
+def test_subtitle_audio_keeps_soft_samples_and_original_offsets(tmp_path):
+    source = tmp_path / "audio.pcm"
+    block = 28 * audio.RATE
+    samples = bytearray(2 * (300 * audio.RATE + 2))
+    for position in (block - 1, block, 300 * audio.RATE, 300 * audio.RATE + 1):
+        samples[position * 2] = 1
+    source.write_bytes(samples)
+    windows = [(outer + offset, wav) for outer, data in audio.iter_wav_chunks(source)
+               for offset, wav in audio.audio_wav_chunks(data)]
+    assert [offset for offset, _ in windows] == [0, 28, 300]
+    for offset, data in windows:
+        with wave.open(io.BytesIO(data)) as wav:
+            assert wav.getnframes() <= 28 * audio.RATE
+            actual = wav.readframes(wav.getnframes())
+        start = round(offset * audio.BYTES_PER_SECOND)
+        assert actual == samples[start:start + len(actual)]
+    assert len(audio.audio_wav_chunks(audio._pcm_wav(bytes(2 * audio.RATE)))) == 0
+
+
+def test_subtitle_audio_rejects_invalid_and_oversized_wav():
+    invalid = io.BytesIO()
+    with wave.open(invalid, "wb") as wav:
+        wav.setparams((2, 2, audio.RATE, 0, "NONE", "not compressed"))
+        wav.writeframes(b"\0" * 4)
+    with pytest.raises(ValueError, match="mono"):
+        audio.audio_wav_chunks(invalid.getvalue())
+    oversized = audio._pcm_wav(bytes((audio.MAX_CHUNK_SECONDS * audio.RATE + 1) * 2))
+    with pytest.raises(ValueError, match="300 seconds"):
+        audio.audio_wav_chunks(oversized)
+
+
 def test_long_speech_splits_at_pause_without_losing_samples():
     # Continuous speech with a 96 ms pause near the end of the first window.
     probabilities = [0.9] * 1400

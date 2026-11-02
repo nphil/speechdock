@@ -4,7 +4,7 @@ A local speech-to-subtitles workspace for Bazarr and other clients. SpeechDock h
 
 One CPU-only app container. The existing llama-swap service launches model servers on demand; SpeechDock itself needs neither GPU access, a Docker socket nor a production Node.js runtime.
 
-Version 0.2.1 fixes a false weak-acoustic rejection in CPU subtitle alignment. Version 0.2.0 added manual model imports, an optional GGUF speech runtime and CPU subtitle alignment. Parakeet CUDA execution is verified on the Tesla P40. CPU alignment has local Plex-fixture and Marquee HTTP proof; fresh installations need Plex configuration and read-only mounts, and TV integration is separately owned.
+Version 0.2.2 preserves quiet subtitle audio and consumes Parakeet’s native lexical token intervals without stretching words to delayed punctuation. Owned registrations can retain a resident English model while other speech models remain on demand. The optional CPU known-text aligner is separate from speech recognition; backend or local client proof does not establish actual TV consumption.
 
 ## Use it
 
@@ -13,7 +13,7 @@ Version 0.2.1 fixes a false weak-acoustic rejection in CPU subtitle alignment. V
 - **Models:** download checksum-verified Whisper models, apply them to llama-swap, and remove only SpeechDock-owned models.
 - **Settings:** choose the engine, transcription and translation models, language, timeouts, upload limit and history retention.
 
-Whisper Turbo is the fast transcription default. **Turbo cannot translate.** English audio translation uses a separate translation-capable model and fails clearly until that model is installed and registered; it never silently substitutes Turbo. Language detection has its own compatible model selection, so choosing a transcription backend without language identification does not silently change Bazarr detection.
+For a compact setup, keep Parakeet Q5 resident for qualified English voice/subtitle work and full Whisper Large-v3 Q5 on demand for multilingual transcription, English translation and language detection. Choose registered models in Settings; an engine alias alone does not mean a model is installed. Whisper Turbo cannot translate. SpeechDock never silently substitutes Turbo for a translation model or a transcription backend for the separately selected detection model.
 
 ## Unraid installation
 
@@ -84,7 +84,19 @@ Supplying a publisher SHA-256 gives a **checksum match**. Without it, the UI say
 
 Importing does **not** register or load a model. Review its detected format, runtime and task capabilities, then explicitly register it. The packaged CrispASR CUDA 12 runtime is copied atomically to an immutable versioned directory beneath the existing shared owned-model mount; no new container, port or always-running service is added. The GPU launcher fails rather than silently running on the CPU when CUDA is unavailable.
 
-Parakeet transcription uses native word timing. Canary transcription uses source-validated DTW estimates, not native word alignment, and requires an explicit spoken language. Neither backend provides verified language detection here; Canary translation is disabled. Whisper remains available. For translation of existing subtitles into other languages, use a subtitle-text translator such as Lingarr with a suitable text model; it is separate from SpeechDock and does not repair source transcription or timing errors.
+Parakeet subtitle transcription reads explicit lexical token intervals from the pinned runtime’s native endpoint. These remain model estimates, not independently measured word onsets. Canary uses source-validated DTW estimates and requires an explicit spoken language. Neither backend supplies verified language detection here; Canary translation is disabled. Full Whisper remains available for multilingual transcription, language detection and translation into English. Translating existing subtitle text into other languages is a separate text-translation task, such as Lingarr; it does not repair recognition or source timing.
+
+### Local English voice deployment
+
+The two-model deployment uses one SpeechDock-managed Parakeet Q5 definition for English voice and English subtitle generation, rather than keeping a separate `parakeet-voice` definition of the same weights. Point the existing `wyoming-openai` bridge’s `STT_MODELS` and SpeechDock’s English transcription selection at that canonical registered model. No extra app container or duplicate model download is needed.
+
+Register the owned Parakeet model with `confirm_reload: true, keep_loaded: true`, then use its same canonical ID in the startup preload hook and consumers while preserving unrelated preload entries. Explicit `keep_loaded: false` restores the 180-second idle timeout; omitting the field preserves the existing policy. A warm member makes the `speechdock` group nonexclusive, persistent and nonswapping, while cold members keep their own idle timeout. This prevents normal idle unloading/eviction, not explicit unloads, process failure or engine reloads. The fresh revision acknowledgement proves the active configuration, not loaded readiness or audio inference. Startup preload is asynchronous; its generic `GET /` may log a 404 even when an ASR process is healthy.
+
+Only the bridge's `STT_MODELS` changed; its Whisper-specific `STT_EXTRA_BODY` prompt was removed. TTS, MQTT, early transcription, satellite choices, the preferred Cloud assistant and the always-on CPU backup are unchanged. The existing local assistant retains its `Local (Kokoro + Whisper)` label because satellite selections and failover rules reference that name. The label no longer identifies its current recognition model.
+
+Keep full Whisper Large-v3 Q5 on demand for language detection, multilingual transcription, English translation and VoiceStudio reference-clip ASR. Choosing Parakeet for English subtitles does not add an automatic error-triggered Parakeet-to-Whisper retry; select the appropriate model before non-English transcription. Remove Turbo and other unused models only after auditing their actual callers. Model cleanup preserves failed job history and does not replace Marquee’s separate CPU known-text aligner.
+
+The initial voice-route check streamed three retained public command recordings through the actual Home Assistant local pipeline, Wyoming bridge and llama-swap: all 12 reference words matched, stopping at speech recognition without intent execution or TTS. This is server-side proof, not a physical microphone test or evidence of LumaShow’s separately selectable voice mode. LumaShow uses the local route only when actually configured for it; do not enable a disabled device or delete a possible legacy dependency based on an unreachable device’s assumed settings.
 
 ### Optional Marquee CPU alignment
 
@@ -106,9 +118,9 @@ A non-null `source_revision` means the source was verified, not that a cue was a
 
 ## Processing and storage
 
-Speech work runs one job at a time with a bounded waiting queue. Uploads are spooled to disk, not retained as whole media files in memory. A checksum-pinned Silero VAD model detects speech on the CPU, one five-minute PCM block at a time. Only bounded voiced windows are sent to llama-swap; subtitles retain their original movie timeline, including long silent openings. Digital silence produces no subtitle cues; language detection reports when no speech is available. Whisper may still miss or misrecognize speech. Cancellation takes effect at safe processing boundaries, not necessarily in the middle of an engine request.
+Speech work runs one job at a time with a bounded waiting queue. Uploads are spooled to disk and normalized in five-minute PCM blocks. Transcription and translation send every bounded non-digitally-silent window, including quiet dialogue and background audio; they do not discard samples on a speech-detector prediction. This can send substantially more audio to the model than VAD-only processing. The checksum-pinned CPU Silero detector is retained for language detection. Original movie offsets, including long openings, are preserved. Digital silence produces no subtitle cues; language detection reports when no speech is available. Recognition can still miss, mishear or hallucinate content. Cancellation takes effect at safe processing boundaries, not necessarily during an engine request.
 
-Subtitle text is preserved from each recognized segment. Cue boundaries use the first token’s onset and the last token’s end rather than Whisper’s coarse segment-time predictions. Intermediate token estimates can overlap or run backward and are not exposed as word intervals. Every finished cue must still have positive duration, remain non-overlapping and fit the physical audio.
+Subtitle text is preserved from each recognized segment. Parakeet uses the existing runtime’s explicit native token intervals, grouped by canonical English word boundaries; punctuation stays in the text but cannot extend a lexical word’s timing. Whisper uses its reported first/last token endpoint estimates, which are not independently verified acoustic word boundaries. Its unused intermediate estimates can overlap or run backward and are not exposed as word intervals. Every finished cue must still have positive duration, remain non-overlapping and fit the physical audio. Unsupported or malformed timing fails clearly rather than being clipped, dropped or replaced with invented times.
 
 Defaults: 1 GiB upload limit, six-hour audio limit and 14-day retained history. Upload limits and retention are configurable. Failed/interrupted jobs remain visible with an explanation. Removing a job or expiring its history only removes SpeechDock's own records and files, never the original media library.
 

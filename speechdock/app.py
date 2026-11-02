@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import __version__
-from .audio import SpeechDetector, iter_wav_chunks, normalize_audio, parse_srt, render, speech_wav_chunks
+from .audio import SpeechDetector, audio_wav_chunks, iter_wav_chunks, normalize_audio, parse_srt, render, speech_wav_chunks
 from .engine import Engine
 from .jobs import JobConflict, JobManager, JobNotFound, QueueFull, UploadTooLarge
 from .languages import normalize_language
@@ -78,7 +78,16 @@ class SettingsPatch(BaseModel):
 
 
 class RegisterBody(BaseModel):
-    confirm_reload: bool = False
+    model_config = ConfigDict(extra="forbid")
+    confirm_reload: bool = Field(default=False, strict=True)
+    keep_loaded: bool | None = Field(default=None, strict=True)
+
+    @field_validator("keep_loaded")
+    @classmethod
+    def valid_keep_loaded(cls, value: bool | None) -> bool:
+        if value is None:
+            raise ValueError("keep_loaded must be a boolean")
+        return value
 
 
 class ImportBody(BaseModel):
@@ -127,11 +136,16 @@ async def lifespan(app: FastAPI):
                 raise ValueError("Audio exceeds the six-hour limit")
             await progress(0, duration)
             cues = []
-            detector = await asyncio.to_thread(
-                SpeechDetector, Path(os.environ.get("SPDOCK_VAD_MODEL", "/opt/speechdock/models/silero-vad-v5.1.onnx"))
-            )
+            detector = None
+            if job["task"] == "detect":
+                detector = await asyncio.to_thread(
+                    SpeechDetector, Path(os.environ.get("SPDOCK_VAD_MODEL", "/opt/speechdock/models/silero-vad-v5.1.onnx"))
+                )
             for chunk_offset, wav in iter_wav_chunks(pcm):
-                windows = await asyncio.to_thread(speech_wav_chunks, wav, detector)
+                if detector is None:
+                    windows = await asyncio.to_thread(audio_wav_chunks, wav)
+                else:
+                    windows = await asyncio.to_thread(speech_wav_chunks, wav, detector)
                 await progress(min(1, chunk_offset / duration) if duration else 1, duration)
                 for relative_offset, speech_wav in windows:
                     offset = chunk_offset + relative_offset
@@ -313,7 +327,7 @@ async def cancel_download(request: Request, catalog_id: str):
 
 @app.post("/api/models/{catalog_id}/register")
 async def register_model(request: Request, catalog_id: str, body: RegisterBody):
-    return await request.app.state.models.register(catalog_id, body.confirm_reload)
+    return await request.app.state.models.register(catalog_id, body.confirm_reload, body.keep_loaded)
 
 
 @app.delete("/api/models/{catalog_id}/registration")
