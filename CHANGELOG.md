@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 — 2026-11-01
+
+- Preserve the raw independent CTC token sequence for acoustic scoring. Previously, normalized boundary or repeated separators could be discarded, falsely rejecting valid alignment as weak audio. Exact independent lexical equality and all token-score, source, hash, bounds and playback/seek epoch guards remain unchanged.
+- On the same 19 retained film windows, aligned results increased from 1 to 2; the other 17 remain estimated due to lexical mismatch. This does not expand audio context, change translation or model defaults, or replace the CPU known-text aligner with the selected speech-to-text model.
+
 ## 0.2.0 — 2026-11-01
 
 - Import supported speech-model files by upload or direct public HTTPS URL, with optional expected SHA-256 and size, bounded streaming transfers, cancellation, restart recovery and explicit native registration. Preserve unrelated models and never load a model simply because it was imported.

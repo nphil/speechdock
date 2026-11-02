@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from speechdock.alignment import AlignmentService, attach_alignment_routes, response
-from speechdock.alignment.core import Rejected, viterbi, words
+from speechdock.alignment.core import AcousticAligner, Rejected, viterbi, words
 from speechdock.alignment.protocol import Window, manifest_hash
 from speechdock.alignment.source import Configuration, PlexSource, open_media, parse_subtitles, stream_index
 
@@ -39,6 +39,46 @@ def test_ctc_repeated_letters_require_separating_blank():
     assert viterbi(logp, [1, 1], 0) == [[1], [3]]
     with pytest.raises(Rejected):
         viterbi(logp[:1], [1, 1], 0)
+
+
+@pytest.mark.parametrize("decoded", ["HI", "|HI", "HI|", "|HI||THERE||", "|HELLO|"])
+def test_alignment_preserves_independent_delimiters_and_native_word_frames(decoded):
+    aligner = AcousticAligner.__new__(AcousticAligner)
+    aligner.vocab = {char: index + 1 for index, char in enumerate(sorted(set(decoded)))}
+    aligner.inverse = {index: char for char, index in aligner.vocab.items()}
+    aligner.blank = 0
+    sequence = [0]
+    positions = []
+    for char in decoded:
+        positions.append(len(sequence))
+        sequence.extend([aligner.vocab[char]] * (6 if char == "|" else 1))
+        sequence.append(0)
+    logp = np.full((len(sequence), len(aligner.vocab) + 1), -20, dtype=np.float32)
+    logp[np.arange(len(sequence)), sequence] = 0
+    aligner.emissions = lambda _: logp
+    text = " ".join(decoded.replace("|", " ").split()).title() + "."
+    origin = 1000
+    bound = origin + len(sequence) * 20
+    result = aligner.align(np.empty(0), text, origin, origin, bound)
+    expected = []
+    cursor = 0
+    for word in text.rstrip(".").upper().split():
+        cursor = decoded.index(word, cursor)
+        expected.append((origin + positions[cursor] * 20,
+                         origin + (positions[cursor + len(word) - 1] + 1) * 20))
+        cursor += len(word)
+    assert [(word["start_ms"], word["end_ms"]) for word in result["words"]] == expected
+    assert [text.encode()[word["start_byte"]:word["end_byte"]].decode() for word in result["words"]] == text.split()
+    assert result["minimum_character_log_score"] == 0
+    for target, start, end, reason in [
+        ("Different words.", origin, bound, "independent_lexical_mismatch"),
+        ("Buenos dias.", origin, bound, "independent_lexical_mismatch"),
+        ("Hi hi.", origin, bound, "ambiguous_repeated_words"),
+        (text, expected[0][0] + 20, bound, "outside_visible_bounds"),
+        (text, origin, expected[-1][1] - 20, "outside_visible_bounds"),
+    ]:
+        with pytest.raises(Rejected, match=reason):
+            aligner.align(np.empty(0), target, origin, start, end)
 
 
 def test_window_limits_and_existing_clipping():

@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from speechdock.alignment import alignment_lifespan, attach_alignment_routes
-from speechdock.alignment.core import Rejected
+from speechdock.alignment.core import AcousticAligner, Rejected, digest_file, viterbi, words
 from speechdock.alignment.protocol import Window, manifest_hash
 from speechdock.alignment.source import Configuration, decode_audio, open_media, probe
 
@@ -167,3 +167,48 @@ def test_real_movie_cpu_and_complete_local_api(tmp_path):
     output = models / "local-api-proof.json"
     output.write_text(json.dumps(evidence, indent=2) + "\n")
     print(json.dumps({key: value for key, value in evidence.items() if key != "cases"}, indent=2))
+
+
+@pytest.mark.skipif(
+    not all(os.environ.get(name) for name in ("SPDOCK_ALIGNMENT_PROOF_DIR",
+        "SPDOCK_ALIGNMENT_MOVIE_PROOF_DIR", "SPDOCK_ALIGNMENT_FILM_REQUESTS_DIR")),
+    reason="Explicit retained film audio and source-request fixture opt-in required",
+)
+def test_real_film_delimiter_path_regression():
+    """Offline core proof, not a production decode/API or human timing annotation."""
+    proof = Path(os.environ["SPDOCK_ALIGNMENT_MOVIE_PROOF_DIR"])
+    original = proof / "dialogue-75.wav"
+    assert digest_file(original) == "bd6e1f6c281c35cd808e04f150ad4d56f9a2a3d58f18f7eb2831f6f52c07b7ed"
+    request_path = Path(os.environ["SPDOCK_ALIGNMENT_FILM_REQUESTS_DIR"]) / "actual-plex-request-949.json"
+    request = Window.model_validate_json(request_path.read_text())
+    cue = request.cues[0]
+    assert cue.ordinal == 949
+    assert (cue.authored_start_ms, cue.authored_end_ms) == (4900660, 4901660)
+    assert (cue.start_ms, cue.end_ms) == (4900660, 4901660)
+    with wave.open(str(original)) as audio:
+        assert (audio.getframerate(), audio.getnchannels(), audio.getsampwidth()) == (16000, 1, 2)
+        audio.setpos((cue.start_ms - 4890000) * 16)
+        pcm = np.frombuffer(audio.readframes((cue.end_ms - cue.start_ms) * 16), dtype="<i2").astype(np.float32) / 32768
+    aligner = AcousticAligner(Path(os.environ["SPDOCK_ALIGNMENT_PROOF_DIR"]))
+    logp = aligner.emissions(pcm)
+    expected = " ".join(word[0] for word in words(cue.text))
+    assert aligner.greedy(logp) == expected
+    # The former reconstruction deleted a real trailing word-delimiter state.
+    former_target = [aligner.vocab[char] for char in expected.replace(" ", "|")]
+    former_frames = viterbi(logp, former_target, aligner.blank)
+    former_scores = [float(logp[frames, token].mean()) for frames, token in zip(former_frames, former_target)]
+    assert min(former_scores) < -3.0
+    aligner.emissions = lambda _: logp
+    result = aligner.align(pcm, cue.text, cue.start_ms, cue.start_ms, cue.end_ms)
+    assert len(result["words"]) == 1
+    assert (result["words"][0]["start_ms"], result["words"][0]["end_ms"]) == (4901300, 4901480)
+    assert result["minimum_character_log_score"] > -0.1
+    assert result["mean_log_score"] > -0.1
+    for target, start, end, reason in [
+        ("Different words.", cue.start_ms, cue.end_ms, "independent_lexical_mismatch"),
+        ("Buenos dias.", cue.start_ms, cue.end_ms, "independent_lexical_mismatch"),
+        (cue.text, 4901320, cue.end_ms, "outside_visible_bounds"),
+        (cue.text, cue.start_ms, 4901460, "outside_visible_bounds"),
+    ]:
+        with pytest.raises(Rejected, match=reason):
+            aligner.align(pcm, target, cue.start_ms, start, end)

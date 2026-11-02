@@ -104,15 +104,19 @@ class AcousticAligner:
         shifted = logits - maximum
         return shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))
 
-    def greedy(self, logp: np.ndarray) -> str:
+    def _greedy_tokens(self, logp: np.ndarray) -> list[int]:
         tokens = []
         previous = None
         for token in np.argmax(logp, axis=1):
             token = int(token)
             if token != previous and token != self.blank:
-                tokens.append(self.inverse[token])
+                tokens.append(token)
             previous = token
-        return " ".join("".join(tokens).replace("|", " ").split())
+        return tokens
+
+    def greedy(self, logp: np.ndarray) -> str:
+        decoded = "".join(self.inverse[token] for token in self._greedy_tokens(logp))
+        return " ".join(decoded.replace("|", " ").split())
 
     def align(self, pcm: np.ndarray, text: str, origin_ms: float, start_ms: int, end_ms: int) -> dict:
         lexical = words(text)
@@ -121,19 +125,22 @@ class AcousticAligner:
         if len({word[0] for word in lexical}) != len(lexical):
             raise Rejected("ambiguous_repeated_words")
         logp = self.emissions(pcm)
-        transcript = self.greedy(logp)
+        target = self._greedy_tokens(logp)
+        decoded = "".join(self.inverse[token] for token in target)
+        transcript = " ".join(decoded.replace("|", " ").split())
         if transcript != normalized:
             raise Rejected("independent_lexical_mismatch")
-        target = [self.vocab[char] for char in normalized.replace(" ", "|")]
+        # Lexical normalization may discard boundary/repeated word delimiters.
+        # Keep their independently observed CTC states: deleting them forces
+        # delimiter audio into letters or blanks, corrupting scores and timing.
         frames = viterbi(logp, target, self.blank)
         scores = [float(logp[item, token].mean()) for item, token in zip(frames, target)]
         if min(scores) < -3.0 or float(np.mean(scores)) < -1.0:
             raise Rejected("weak_acoustic_evidence")
         result = []
-        cursor = 0
         previous_end = start_ms
-        for word, first, last in lexical:
-            selected = frames[cursor:cursor + len(word)]
+        for (word, first, last), span in zip(lexical, re.finditer(r"[^|]+", decoded), strict=True):
+            selected = frames[span.start():span.end()]
             begin = round(origin_ms + selected[0][0] * 1000 * STRIDE / SAMPLE_RATE)
             end = round(origin_ms + (selected[-1][-1] + 1) * 1000 * STRIDE / SAMPLE_RATE)
             if not start_ms <= begin < end <= end_ms or begin < previous_end:
@@ -142,5 +149,4 @@ class AcousticAligner:
                 raise Rejected("implausible_word_duration")
             result.append({"start_byte": first, "end_byte": last, "start_ms": begin, "end_ms": end})
             previous_end = end
-            cursor += len(word) + 1
         return {"words": result, "mean_log_score": float(np.mean(scores)), "minimum_character_log_score": min(scores)}

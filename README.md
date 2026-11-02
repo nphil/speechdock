@@ -4,7 +4,7 @@ A local speech-to-subtitles workspace for Bazarr and other clients. SpeechDock h
 
 One CPU-only app container. The existing llama-swap service launches model servers on demand; SpeechDock itself needs neither GPU access, a Docker socket nor a production Node.js runtime.
 
-Version 0.2.0 adds manual model imports, an optional GGUF speech runtime and CPU subtitle alignment. Parakeet CUDA execution is verified on the Tesla P40. CPU alignment has real local Plex-fixture and Marquee HTTP proof; it still requires production Plex credentials/read-only mounts and the separately owned TV integration before use.
+Version 0.2.1 fixes a false weak-acoustic rejection in CPU subtitle alignment. Version 0.2.0 added manual model imports, an optional GGUF speech runtime and CPU subtitle alignment. Parakeet CUDA execution is verified on the Tesla P40. CPU alignment has local Plex-fixture and Marquee HTTP proof; fresh installations need Plex configuration and read-only mounts, and TV integration is separately owned.
 
 ## Use it
 
@@ -90,14 +90,16 @@ Parakeet transcription uses native word timing. Canary transcription uses source
 
 The optional `POST /api/alignment/windows` service, introduced in 0.2.0, aligns exact English subtitle text to selected audio using a pinned quantized wav2vec2 CTC model on the CPU. An independent, unprompted recognition check rejects mismatched text, silence and unsupported characters. It preserves authored cue bounds and returns estimated fallback, never invented word times, when alignment is unsafe. Requests and responses bind the exact playback, seek generation, Plex media/part/audio/subtitle identity, subtitle digest and cue manifest. The Marquee client rejects stale responses and requires the actual selected renderer-ready subtitle source.
 
-Configure these trusted server-side variables and mount media **read-only** before enabling the client endpoint:
+Version 0.2.1 preserves the raw independently recognized CTC tokens for acoustic scoring, avoiding false weak-acoustic rejection when normalization removes boundary or repeated separators. Exact independent lexical equality and all token-score, source, hash, bounds and playback/seek epoch guards remain unchanged. On the same 19 retained film windows, alignment improved from 1 to 2; the other 17 remained estimated because of lexical mismatch. Audio context, translation and model defaults are unchanged. The selected speech-to-text model does not replace the separate CPU known-text aligner.
+
+For a fresh installation, configure these trusted server-side variables and mount media **read-only** before enabling the client endpoint. An already-configured production installation does not need these settings re-entered just for this update:
 
 - `SPDOCK_ALIGNMENT_PLEX_URL`: the trusted Plex server origin, without token, query or path.
 - `SPDOCK_ALIGNMENT_PLEX_TOKEN_FILE`: a private readable token file; never send it from the client or include it in a URL.
 - `SPDOCK_ALIGNMENT_ROOTS`: JSON mappings such as `[{"plex":"/PMS/movies","local":"/media/movies"}]` matching Plex paths to read-only container mounts.
 - `SPDOCK_ALIGNMENT_MODEL_DIR`: `/opt/speechdock/models/alignment` in the packaged image. Its model, vocabulary, configuration, provenance and Apache-2.0 license are baked in and checksummed; requests never download assets.
 
-Missing configuration does not break ordinary SpeechDock jobs: alignment reports an explicit estimated result. Alignment admits one active CPU request and one waiting request, uses bounded windows and has no persistent result cache. Marquee diagnostics require separate session-only consent and default off. Local fixtures prove real CPU alignment and Rust HTTP exchange, including stale-generation rejection; no production Plex mount, TV activation or deployment is implied.
+Missing configuration does not break ordinary SpeechDock jobs: alignment reports an explicit estimated result. Alignment admits one active CPU request and one waiting request, uses bounded windows and has no persistent result cache. Marquee diagnostics require separate session-only consent and default off. Local fixtures prove real CPU alignment and Rust HTTP exchange, including stale-generation rejection; they do not by themselves prove TV activation or deployment.
 
 A non-null `source_revision` means the source was verified, not that a cue was acoustically aligned. Consumers must check each cue’s `status`, use word timings only for `aligned` cues, and clear previously accepted timings when a cue falls back to `estimated` or its source changes. Strict acoustic checks can reject ordinary film dialogue even with correct server configuration; an estimated response is not positive alignment proof.
 
