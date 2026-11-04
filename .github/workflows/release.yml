@@ -83,7 +83,22 @@ jobs:
           curl --fail --silent http://127.0.0.1:18000/icon-512.png -o "$RUNNER_TEMP/icon.png"
           python3 -c 'import pathlib,sys; assert pathlib.Path(sys.argv[1]).read_bytes().startswith(bytes.fromhex("89504e470d0a1a0a"))' "$RUNNER_TEMP/icon.png"
           test "$(docker inspect speechdock-smoke --format '{{.Config.User}}')" = '1000:1000'
-          docker exec speechdock-smoke ffmpeg -version >/dev/null
+          ffmpeg_version=$(docker exec speechdock-smoke ffmpeg -version)
+          grep -q '^ffmpeg version 8\.1\.3 ' <<< "$ffmpeg_version" || { echo "Unexpected FFmpeg: $ffmpeg_version"; exit 1; }
+          docker exec speechdock-smoke ffprobe -version >/dev/null
+          # An xHE-AAC (USAC) stream from the official FFmpeg FATE suite; Debian's FFmpeg 5.1 cannot open it.
+          curl --fail --silent --show-error --location https://fate-suite.ffmpeg.org/aac/usac/Fd_1_c1_0x03.mp4 -o "$RUNNER_TEMP/usac.mp4"
+          echo "ccf48a4a55648bd8dc7e8655ffc0772ad86cb442b087b8e055ff78604153c7ec  $RUNNER_TEMP/usac.mp4" | sha256sum --check --strict -
+          docker cp "$RUNNER_TEMP/usac.mp4" speechdock-smoke:/tmp/usac.mp4
+          test "$(docker exec speechdock-smoke ffprobe -v error -show_entries stream=codec_name,profile -of csv=p=0 /tmp/usac.mp4)" = 'aac,xHE-AAC'
+          docker exec speechdock-smoke ffmpeg -nostdin -v error -y -i /tmp/usac.mp4 -vn -ac 1 -ar 16000 -f s16le /tmp/usac.pcm
+          docker exec -i speechdock-smoke python - <<'PY'
+          from array import array
+          from pathlib import Path
+          samples = array("h")
+          samples.frombytes(Path("/tmp/usac.pcm").read_bytes())
+          assert len(samples) >= 320000 and max(map(abs, samples)) > 1000, "The xHE-AAC sample must decode to 20 s of audio"
+          PY
           docker exec -i speechdock-smoke python - <<'PY'
           import io
           import wave

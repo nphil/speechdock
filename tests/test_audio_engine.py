@@ -45,6 +45,26 @@ def test_ffmpeg_decodes_wav(tmp_path):
     assert dest.stat().st_size == 32000
 
 
+@pytest.mark.parametrize("body,expected", [
+    ("exit 1", "Could not decode audio: ffmpeg exited with code 1 and no message"),
+    ("echo '[aac @ 0x1] Audio object type 42 is not implemented.' >&2\necho 'Error while opening decoder' >&2\nexit 183",
+     "Could not decode audio: ffmpeg exited with code 183: [aac @ 0x1] Audio object type 42 is not implemented.\nError while opening decoder"),
+])
+def test_decode_failure_says_what_ffmpeg_said(tmp_path, monkeypatch, body, expected):
+    """An audio format FFmpeg cannot open (xHE-AAC on FFmpeg 5.1) once surfaced as an empty 'Could not decode audio: '."""
+    tool = tmp_path / "bin" / "ffmpeg"
+    tool.parent.mkdir()
+    tool.write_text(f"#!/bin/sh\n{body}\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tool.parent}:/usr/bin:/bin")
+    source, dest = tmp_path / "in.mkv", tmp_path / "out.pcm"
+    source.write_bytes(b"x")
+    with pytest.raises(ValueError) as caught:
+        asyncio.run(audio.normalize_audio(source, dest, True))
+    assert str(caught.value) == expected
+    assert not dest.exists()
+
+
 def test_subtitle_offset_and_formats():
     source = "1\n00:00:00,000 --> 00:00:01,500\nHello\nworld\n\n2\n00:00:01,500 --> 00:00:02,000\nBye\n"
     cues = audio.parse_srt(source, 300)

@@ -1,10 +1,14 @@
 """Clients and timing adapters for shared Whisper and pinned CrispASR runtimes."""
 
+import asyncio
 import io
+import logging
 import math
 import textwrap
+import time
 import unicodedata
 import wave
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -16,6 +20,69 @@ from .languages import LANGUAGES, normalize_language
 
 class EngineError(ValueError):
     """An actionable engine connectivity or response error."""
+
+
+class EngineUnavailable(EngineError):
+    """The engine is down, reloading or not ready yet; asking again later is expected to work."""
+
+
+class ResponseRejected(EngineError):
+    """The engine answered, but its reply failed SpeechDock's checks (timings, completeness, format).
+    Asking again about the very same audio fails the same way; cutting the audio differently may not."""
+
+
+log = logging.getLogger("speechdock.engine")
+
+ENGINE_WAIT_SECONDS = 900.0  # how long one request waits for a restarting or reloading engine
+RETRY_FIRST_SECONDS = 1.0
+RETRY_CAP_SECONDS = 15.0
+# 502/503/504 is what the reverse proxy or llama-swap answers while the engine restarts, reloads or loads a model.
+TRANSIENT_STATUS = frozenset({502, 503, 504})
+TRANSIENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, httpx.WriteError,
+                    httpx.RemoteProtocolError, httpx.PoolTimeout)
+
+
+class EngineWait:
+    """Bounded, growing pauses while the engine is not there; one instance per outage.
+
+    ``pause`` sleeps and returns, or raises ``EngineUnavailable`` once the limit is spent, so a job
+    waits for a restart instead of failing, and a dead engine still ends the job in the end. The
+    optional ``on_wait(reason, waited_seconds)`` hook is awaited before every sleep (jobs use it
+    to notice a cancellation).
+    """
+
+    def __init__(self, limit: float, first: float, cap: float,
+                 on_wait: Callable[[str, float], Awaitable[None]] | None = None):
+        self.limit, self.first, self.cap, self.on_wait = limit, first, cap, on_wait
+        self.started: float | None = None
+        self.attempt = 0
+
+    async def pause(self, reason: str) -> None:
+        now = time.monotonic()
+        if self.started is None:
+            self.started = now
+            log.warning("Speech engine unavailable (%s); waiting up to %g s for it to come back", reason, self.limit)
+        waited = now - self.started
+        delay = min(self.cap, self.first * 2 ** self.attempt)
+        if waited + delay > self.limit:
+            span = f"{self.limit / 60:g} min" if self.limit >= 60 else f"{self.limit:g} s"
+            raise EngineUnavailable(f"The speech engine was not available for {span} ({reason})")
+        self.attempt += 1
+        if self.on_wait is not None:
+            await self.on_wait(reason, waited)
+        await asyncio.sleep(delay)
+
+    def recovered(self) -> None:
+        if self.started is not None:
+            log.warning("Speech engine is back after %.0f s", time.monotonic() - self.started)
+            self.started, self.attempt = None, 0
+
+
+def make_wait(settings: dict, on_wait: Callable[[str, float], Awaitable[None]] | None = None) -> EngineWait:
+    """A bounded wait for one outage. ``engine_wait_seconds`` / ``engine_retry_seconds`` are not saved
+    settings; they exist so tests can shorten the waits."""
+    first = float(settings.get("engine_retry_seconds", RETRY_FIRST_SECONDS))
+    return EngineWait(float(settings.get("engine_wait_seconds", ENGINE_WAIT_SECONDS)), first, max(first, RETRY_CAP_SECONDS), on_wait)
 
 
 def _aligned_cues(payload: dict) -> list[Cue]:
@@ -321,12 +388,19 @@ def _base_url(value: str) -> str:
 
 
 class Engine:
-    def __init__(self, settings: dict, *, runtime="whisper.cpp", architecture="whisper"):
+    def __init__(self, settings: dict, *, runtime="whisper.cpp", architecture="whisper",
+                 on_wait: Callable[[str, float], Awaitable[None]] | None = None):
         if (runtime, architecture) not in {("whisper.cpp", "whisper"), ("crispasr", "parakeet"), ("crispasr", "canary")}:
             raise EngineError("Unsupported speech runtime or architecture")
         self.runtime, self.architecture = runtime, architecture
         self.url = _base_url(settings["engine_url"])
         self.timeout = httpx.Timeout(float(settings.get("inference_timeout_seconds", 3600)), connect=float(settings.get("connect_timeout_seconds", 10)))
+        self.wait_settings = {key: settings[key] for key in ("engine_wait_seconds", "engine_retry_seconds") if key in settings}
+        self.on_wait = on_wait
+
+    def waiter(self) -> EngineWait:
+        """A fresh bounded wait for one outage, with this engine's limits and hook."""
+        return make_wait(self.wait_settings, self.on_wait)
 
     async def probe(self) -> dict:
         try:
@@ -342,18 +416,30 @@ class Engine:
             return {"reachable": False, "models": [], "error": f"Engine probe failed: {type(exc).__name__}"}
 
     async def _request(self, wav: bytes, model: str, fields: dict) -> httpx.Response:
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-                path = ("/upstream/" + quote(model, safe="") + "/inference"
-                        if (self.runtime, self.architecture) == ("crispasr", "parakeet")
-                        else "/v1/audio/transcriptions")
-                response = await client.post(self.url + path, data={"model": model, **fields}, files={"file": ("audio.wav", wav, "audio/wav")})
-                response.raise_for_status()
+        """POST one window. A restarting or reloading engine (connection refused or dropped,
+        HTTP 502/503/504) is waited for with growing pauses up to the wait limit, then
+        ``EngineUnavailable``; any other failure is an immediate ``EngineError``."""
+        path = ("/upstream/" + quote(model, safe="") + "/inference"
+                if (self.runtime, self.architecture) == ("crispasr", "parakeet")
+                else "/v1/audio/transcriptions")
+        wait = self.waiter()
+        while True:
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+                    response = await client.post(self.url + path, data={"model": model, **fields}, files={"file": ("audio.wav", wav, "audio/wav")})
+                    response.raise_for_status()
+                wait.recovered()
                 return response
-        except httpx.HTTPStatusError as exc:
-            raise EngineError(f"Speech engine returned HTTP {exc.response.status_code}") from exc
-        except httpx.HTTPError as exc:
-            raise EngineError(f"Speech engine request failed: {type(exc).__name__}") from exc
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status not in TRANSIENT_STATUS:
+                    raise EngineError(f"Speech engine returned HTTP {status}") from exc
+                reason = f"HTTP {status}"
+            except TRANSIENT_ERRORS as exc:
+                reason = type(exc).__name__
+            except httpx.HTTPError as exc:
+                raise EngineError(f"Speech engine request failed: {type(exc).__name__}") from exc
+            await wait.pause(reason)
 
     def _crisp_fields(self, language: str) -> dict:
         fields = {"language": language, "response_format": "verbose_json",
@@ -413,7 +499,7 @@ class Engine:
                 cues[-1] = Cue(final.start_ms, duration_ms, final.text)
             return render(cues, "srt")
         except (ValueError, wave.Error, EOFError) as exc:
-            raise EngineError(str(exc)) from exc
+            raise ResponseRejected(str(exc)) from exc
 
     async def detect(self, wav: bytes, model: str) -> dict:
         if self.runtime != "whisper.cpp":

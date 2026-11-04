@@ -28,6 +28,8 @@ class JobConflict(ValueError):
 
 
 MAX_CAPTION_QUEUE = 5000
+MAX_RESTARTS = 3  # a job that keeps being cut short by restarts stops being retried
+RESTART_GAVE_UP = f"Processing was interrupted by a restart {MAX_RESTARTS} times and was not retried again"
 
 
 class JobManager:
@@ -69,13 +71,23 @@ class JobManager:
             return
         self._closing = False
         now = utcnow()
-        # Work in flight cannot safely be assumed to have completed across restarts.
+        # A job that was running when the service stopped goes back in the queue: its input (the spooled
+        # upload, or the caption path) is still there. A cancel that had not finished stays a cancel.
         with self.store.db:
-            self.store.db.execute("UPDATE jobs SET status='failed', finished_at=?, error=? WHERE status IN ('running','cancelling')", (now, "Processing was interrupted by a restart"))
-        live = {row[0] for row in self.store.db.execute("SELECT id FROM jobs WHERE status='queued'")}
+            self.store.db.execute("UPDATE jobs SET status='cancelled', finished_at=? WHERE status='cancelling'", (now,))
+            self.store.db.execute("UPDATE jobs SET status='queued', started_at=NULL, progress=NULL, restarts=restarts+1 WHERE status='running' AND restarts<?", (MAX_RESTARTS,))
+            self.store.db.execute("UPDATE jobs SET status='failed', finished_at=?, error=? WHERE status='running'", (now, RESTART_GAVE_UP))
+        queued = self.store.db.execute("SELECT id, task FROM jobs WHERE status='queued'").fetchall()
+        live = {row["id"] for row in queued}
+        for row in queued:
+            if row["task"] != "captions" and not self._path(row["id"]).is_file():
+                with self.store.db:
+                    self.store.db.execute("UPDATE jobs SET status='failed', finished_at=?, error=? WHERE id=?", (now, "The uploaded audio was lost during the restart", row["id"]))
+                live.discard(row["id"])
         for path in self.upload_dir.iterdir():
             job_id = path.name[:-4] if path.name.endswith(".pcm") else path.name
-            if path.is_file() and job_id not in live:
+            # A .pcm file is scratch from an interrupted run; an upload stays only while its job is waiting.
+            if path.is_file() and (path.name.endswith(".pcm") or job_id not in live):
                 try:
                     self._path(job_id)
                 except JobNotFound:
@@ -84,6 +96,16 @@ class JobManager:
         await self.cleanup()
         self._worker = asyncio.create_task(self._run())
         self._wake.set()
+
+    def _interrupted(self, job_id: str) -> bool:
+        """A shutdown cut this job short: queue it again (True, its upload must stay) unless it was being
+        cancelled or has already been cut short too often."""
+        now = utcnow()
+        with self.store.db:
+            self.store.db.execute("UPDATE jobs SET status='cancelled', finished_at=? WHERE id=? AND status='cancelling'", (now, job_id))
+            requeued = self.store.db.execute("UPDATE jobs SET status='queued', started_at=NULL, progress=NULL, restarts=restarts+1 WHERE id=? AND status='running' AND restarts<?", (job_id, MAX_RESTARTS)).rowcount
+            self.store.db.execute("UPDATE jobs SET status='failed', finished_at=?, error=? WHERE id=? AND status='running'", (now, RESTART_GAVE_UP, job_id))
+        return bool(requeued)
 
     async def close(self) -> None:
         self._closing = True
@@ -98,9 +120,8 @@ class JobManager:
             if self._active is not None and not self._active.done():
                 self._active.cancel()
                 await asyncio.gather(self._active, return_exceptions=True)
-            with self.store.db:
-                self.store.db.execute("UPDATE jobs SET status='failed',finished_at=?,error=? WHERE id=? AND status IN ('running','cancelling')", (utcnow(), "Processing was interrupted by shutdown", self._active_id))
-            self._remove_upload(self._active_id)
+            if not self._interrupted(self._active_id):
+                self._remove_upload(self._active_id)
             self._active = None
             self._active_id = None
         await self._notify()
@@ -247,6 +268,7 @@ class JobManager:
                     await self.cleanup()
                 continue
             await self._notify()
+            keep_upload = False
             try:
                 result = await self._active
                 async with self._lock:
@@ -259,8 +281,7 @@ class JobManager:
                         self.store.db.execute("UPDATE jobs SET status=?,finished_at=?,progress=?,duration_seconds=COALESCE(?,duration_seconds),error=?,result_text=?,result_json=? WHERE id=?", (status, utcnow(), 1.0 if status == "completed" else current["progress"], result.get("duration_seconds"), error, result.get("result_text") if status == "completed" else None, json.dumps(result["result_json"]) if status == "completed" and result.get("result_json") is not None else None, job_id))
             except asyncio.CancelledError:
                 if self._closing:
-                    with self.store.db:
-                        self.store.db.execute("UPDATE jobs SET status='failed',finished_at=?,error=? WHERE id=?", (utcnow(), "Processing was interrupted by shutdown", job_id))
+                    keep_upload = self._interrupted(job_id)
                     raise
                 with self.store.db:
                     self.store.db.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE id=?", (utcnow(), job_id))
@@ -272,17 +293,20 @@ class JobManager:
                 with self.store.db:
                     self.store.db.execute("UPDATE jobs SET status=CASE WHEN status='cancelling' THEN 'cancelled' ELSE 'failed' END,finished_at=?,error=CASE WHEN status='cancelling' THEN NULL ELSE ? END WHERE id=?", (utcnow(), message, job_id))
             finally:
-                self._remove_upload(job_id)
+                if not keep_upload:
+                    self._remove_upload(job_id)
                 self._active = None
                 self._active_id = None
                 await self._notify()
             await self.cleanup()
 
     def _progress(self, job_id: str):
-        async def update(progress: float, duration_seconds: float | None = None) -> None:
+        async def update(progress: float | None, duration_seconds: float | None = None) -> None:
             job = self.store.get_job(job_id)
             if job and job["status"] == "cancelling":
                 raise asyncio.CancelledError
+            if progress is None:
+                return  # only a check that the job was not cancelled, e.g. while it waits for the engine
             with self.store.db:
                 self.store.db.execute("UPDATE jobs SET progress=?,duration_seconds=COALESCE(?,duration_seconds) WHERE id=? AND status='running'", (max(0.0, min(1.0, float(progress))), duration_seconds, job_id))
             await self._notify()

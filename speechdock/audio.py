@@ -21,12 +21,19 @@ class Cue:
     text: str
 
 
+def tool_failure(what: str, tool: str, code: int, err: bytes) -> str:
+    """``what: <tool> exited with code N: <last stderr lines>``; says so when the tool printed nothing."""
+    lines = [line.strip() for line in err.decode(errors="replace").splitlines() if line.strip()]
+    tail = "\n".join(lines)[-300:]
+    return f"{what}: {tool} exited with code {code}" + (f": {tail}" if tail else " and no message")
+
+
 async def normalize_audio(source: Path, destination: Path, encode: bool) -> float:
     """Write mono 16 kHz signed 16-bit PCM and return its duration."""
     source, destination = Path(source), Path(destination)
     if encode:
         process = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(source),
+            "ffmpeg", "-nostdin", "-v", "warning", "-y", "-i", str(source),
             "-vn", "-ac", "1", "-ar", str(RATE), "-t", "21600.000063",
             "-f", "s16le", str(destination),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
@@ -41,7 +48,7 @@ async def normalize_audio(source: Path, destination: Path, encode: bool) -> floa
             raise
         if process.returncode:
             destination.unlink(missing_ok=True)
-            raise ValueError("Could not decode audio: " + stderr.decode(errors="replace").strip()[-1000:])
+            raise ValueError(tool_failure("Could not decode audio", "ffmpeg", process.returncode, stderr))
     else:
         if source.stat().st_size > MAX_BYTES:
             raise ValueError("Audio exceeds the 6-hour limit")

@@ -19,10 +19,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import __version__
 from .audio import SpeechDetector, audio_wav_chunks, iter_wav_chunks, normalize_audio, parse_srt, render, speech_wav_chunks
-from .engine import Engine
+from .engine import ENGINE_WAIT_SECONDS, Engine, EngineUnavailable, EngineWait, make_wait
 from .jobs import JobConflict, JobManager, JobNotFound, QueueFull, UploadTooLarge
 from .languages import normalize_language
 from .models import ModelError, ModelManager
+from .recovery import Fallback, transcribe_window
 from .store import Store
 from .alignment import alignment_lifespan, attach_alignment_routes
 from .captions import Ledger, attach_caption_routes, run_caption_job
@@ -102,11 +103,23 @@ class ImportBody(BaseModel):
     source_filename: str | None = None
 
 
-async def model_for(app: FastAPI, model: str, task: str) -> dict:
+async def model_for(app: FastAPI, model: str, task: str, *, strict: bool = False) -> dict:
+    """The registered model for a task.
+
+    An engine that cannot be reached cannot say whether a model is registered. With ``strict`` that
+    raises ``EngineUnavailable`` (a job waits and asks again); otherwise the model is accepted on what
+    SpeechDock knows itself, so a request is queued while the engine restarts instead of being refused.
+    A model the engine does list as missing, or one SpeechDock does not know, is refused at once.
+    """
     items = await app.state.models.list_models()
     item = next((item for item in items if item["model_id"] == model), None)
-    if item is None or not item["registered"]:
+    if item is None:
         raise ValueError(f"Model '{model}' is not available. Install and register it in Models first.")
+    if not item["registered"]:
+        if item.get("engine_reachable", True):
+            raise ValueError(f"Model '{model}' is not available. Install and register it in Models first.")
+        if strict:
+            raise EngineUnavailable("The speech engine cannot be reached, so the model cannot be confirmed yet")
     if task == "translate" and not item["translation_capable"]:
         raise ValueError(f"Model '{model}' cannot translate. Select a translation-capable model.")
     if task == "detect" and not item.get("language_detection_capable", False):
@@ -114,37 +127,68 @@ async def model_for(app: FastAPI, model: str, task: str) -> dict:
     return item
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    store = Store(DATA_DIR)
-    url = store.get_settings()["engine_url"]
-    normalized = normalize_url(url)
-    if normalized != url:
-        store.update_settings({"engine_url": normalized})
-    models = ModelManager(DATA_DIR, store.get_settings)
-    app.state.store, app.state.models = store, models
-    app.state.ledger = Ledger(store.db)
-    shutil.rmtree(DATA_DIR / "captions-work", ignore_errors=True)
+async def ready_model(app: FastAPI, model: str, task: str, wait: EngineWait) -> dict:
+    """``model_for`` for a job about to run: while the engine is down, wait for it (bounded by ``wait``)
+    instead of failing the job; a model that is really not registered still fails at once."""
+    while True:
+        try:
+            item = await model_for(app, model, task, strict=True)
+        except EngineUnavailable:
+            await wait.pause("engine not reachable")
+            continue
+        wait.recovered()
+        return item
+
+
+FALLBACK_WAIT_SECONDS = 90  # a fallback model that will not start is dropped quickly, unlike the engine itself
+
+
+async def fallback_for(app: FastAPI, settings: dict, item: dict, task: str, waiting) -> Fallback | None:
+    """The model that gets a window the first model's timings could not be recovered for: the translation
+    model, which is a full Whisper (a Whisper primary has no second model, and translation is Whisper's job)."""
+    if task != "transcribe" or item["runtime"] == "whisper.cpp":
+        return None
+    try:
+        other = await model_for(app, settings["translation_model"], "translate")
+    except ValueError:
+        return None
+    if other["runtime"] != "whisper.cpp":
+        return None
+    limits = {**settings, "engine_wait_seconds": min(float(settings.get("engine_wait_seconds", ENGINE_WAIT_SECONDS)), FALLBACK_WAIT_SECONDS)}
+    return Fallback(Engine(limits, runtime=other["runtime"], architecture=other["architecture"], on_wait=waiting), settings["translation_model"])
+
+
+def make_processor(app: FastAPI, store: Store):
+    """The job processor: wait for the engine, then transcribe, translate, detect or caption."""
 
     async def process(job: dict, path: Path, progress):
+        settings = store.get_settings()
+
+        async def waiting(reason: str, waited: float) -> None:
+            await progress(None)  # a job cancelled while it waits for the engine stops waiting
+
+        item = await ready_model(app, job["model"], "transcribe" if job["task"] == "captions" else job["task"], make_wait(settings, waiting))
         if job["task"] == "captions":
-            caption_model = await model_for(app, job["model"], "transcribe")
             return await run_caption_job(
                 job=job, progress=progress, ledger=app.state.ledger, workdir=DATA_DIR / "captions-work",
-                engine=Engine(store.get_settings(), runtime=caption_model["runtime"], architecture=caption_model["architecture"]))
-        item = await model_for(app, job["model"], job["task"])
-        settings = store.get_settings()
+                engine=Engine(settings, runtime=item["runtime"], architecture=item["architecture"], on_wait=waiting))
         if item.get("requires_language") and job["language"] == "auto":
             raise ValueError("This model requires an explicit source language.")
-        engine = Engine(settings, runtime=item["runtime"], architecture=item["architecture"])
+        engine = Engine(settings, runtime=item["runtime"], architecture=item["architecture"], on_wait=waiting)
         pcm = path.with_suffix(".pcm")
         try:
             duration = await normalize_audio(path, pcm, job.get("encode", True))
             if duration > 6 * 3600:
                 raise ValueError("Audio exceeds the six-hour limit")
             await progress(0, duration)
-            cues = []
+            cues, recovered = [], []
+            fallback_models: list[Fallback | None] = []
+
+            async def fallback() -> Fallback | None:
+                if not fallback_models:
+                    fallback_models.append(await fallback_for(app, settings, item, job["task"], waiting))
+                return fallback_models[0]
+
             detector = None
             if job["task"] == "detect":
                 detector = await asyncio.to_thread(
@@ -162,7 +206,8 @@ async def lifespan(app: FastAPI):
                         result = await engine.detect(speech_wav, job["model"])
                         await progress(1, duration)
                         return {"result_json": result, "duration_seconds": duration}
-                    text = await engine.transcribe(speech_wav, job["model"], job["language"], job["task"])
+                    text = await transcribe_window(engine, speech_wav, job["model"], job["language"], job["task"],
+                                                   fallback=fallback, at=offset, recovered=recovered)
                     next_cues = parse_srt(text, offset)
                     with wave.open(io.BytesIO(speech_wav), "rb") as source:
                         window_ms = source.getnframes() * 1000 // source.getframerate()
@@ -173,11 +218,30 @@ async def lifespan(app: FastAPI):
                 await progress(min(1, (chunk_offset + 300) / duration) if duration else 1, duration)
             if job["task"] == "detect":
                 raise ValueError("Cannot detect language: no speech found in the recording")
-            return {"result_text": render(cues, "srt"), "duration_seconds": duration}
+            result = {"result_text": render(cues, "srt"), "duration_seconds": duration}
+            if recovered:
+                result["result_json"] = {"recovery": recovered}
+            return result
         finally:
             pcm.unlink(missing_ok=True)
 
-    jobs = JobManager(store, process, store.get_settings)
+    return process
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    store = Store(DATA_DIR)
+    url = store.get_settings()["engine_url"]
+    normalized = normalize_url(url)
+    if normalized != url:
+        store.update_settings({"engine_url": normalized})
+    models = ModelManager(DATA_DIR, store.get_settings)
+    app.state.store, app.state.models = store, models
+    app.state.ledger = Ledger(store.db)
+    shutil.rmtree(DATA_DIR / "captions-work", ignore_errors=True)
+
+    jobs = JobManager(store, make_processor(app, store), store.get_settings)
     app.state.jobs = jobs
     await jobs.start()
     try:
@@ -285,7 +349,7 @@ async def patch_settings(request: Request, patch: SettingsPatch):
     for key, task in (("transcription_model", "transcribe"), ("translation_model", "translate"), ("detection_model", "detect")):
         if key in changes:
             try:
-                await model_for(request.app, changes[key], task)
+                await model_for(request.app, changes[key], task, strict=True)
             except ValueError as exc:
                 raise HTTPException(422, clean_error(exc)) from exc
     return request.app.state.store.update_settings(changes)

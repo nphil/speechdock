@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,6 +14,8 @@ from . import media
 
 MAX_WEBHOOK_BYTES = 2 * 1024 * 1024
 WEBHOOK_EVENTS = frozenset({"download", "upgrade"})  # Sonarr/Radarr "On Import" and "On Upgrade"
+WEBHOOK_PROBE_TIMEOUT = 30
+NOT_A_DUB = "No English audio together with a non-English audio track (not a dub)"
 
 
 class CaptionBody(BaseModel):
@@ -53,18 +56,24 @@ def attach_caption_routes(app: FastAPI, model_for: Callable[[FastAPI, str, str],
             raise HTTPException(422, str(exc)) from exc
         return model
 
-    async def queue(request: Request, paths: list[str], *, source: str, force: bool) -> dict:
+    async def queue(request: Request, paths: list[str], *, source: str, force: bool,
+                    check: Callable[[str], Awaitable[str | None]] | None = None) -> dict:
+        """Queue each path. ``check`` returns a reason to skip a video (not queued, not recorded) or None;
+        it may raise MediaError to reject one. Only then does the reply carry a ``skipped`` list."""
         model = await transcription_model(request)
-        queued, existing, rejected = [], [], []
+        queued, existing, rejected, skipped = [], [], [], []
         for value in dict.fromkeys(paths):
             try:
                 path = str(await asyncio.to_thread(media.resolve_media_path, value))
+                if check and (reason := await check(path)):
+                    skipped.append({"path": path, "reason": reason})
+                    continue
                 job, created = await request.app.state.jobs.submit_captions(source=source, path=path, force=force, model=model)
             except (media.MediaError, QueueFull) as exc:
                 rejected.append({"path": value, "error": str(exc)})
                 continue
             (queued if created else existing).append({"path": path, "job_id": job["id"]})
-        return {"queued": queued, "already_queued": existing, "rejected": rejected}
+        return {"queued": queued, "already_queued": existing, "rejected": rejected, **({"skipped": skipped} if check else {})}
 
     @router.post("", status_code=202)
     async def create(request: Request, body: CaptionBody):
@@ -87,7 +96,8 @@ def attach_caption_routes(app: FastAPI, model_for: Callable[[FastAPI, str, str],
         """Sonarr/Radarr Connect (Webhook) target: caption each file on import or upgrade.
 
         Answers 200 for every event it understands so the *arr app reports no failure; files are
-        queued only while the auto-captions setting is on.
+        queued only while the auto-captions setting is on and only if they are dubs (English audio
+        plus a non-English track); the others are listed under ``skipped``.
         """
         raw = await request.body()
         if len(raw) > MAX_WEBHOOK_BYTES:
@@ -103,8 +113,14 @@ def attach_caption_routes(app: FastAPI, model_for: Callable[[FastAPI, str, str],
             return {"status": "ignored", "event": event}
         if not request.app.state.store.get_settings()["auto_captions"]:
             return {"status": "disabled", "event": event, "detail": "Turn on auto-captions in Settings to caption imports."}
+
+        async def dub_check(path: str) -> str | None:
+            streams = (await media.probe(Path(path), timeout=WEBHOOK_PROBE_TIMEOUT))["streams"]
+            return None if media.is_dub_situation(streams) else NOT_A_DUB
+
         # An import means the file at this path is new, so a caption SpeechDock wrote for the old one is stale.
-        return {"status": "queued", "event": event, **await queue(request, arr_paths(payload), source="webhook", force=True)}
+        return {"status": "queued", "event": event,
+                **await queue(request, arr_paths(payload), source="webhook", force=True, check=dub_check)}
 
     @router.get("")
     async def decisions(request: Request, limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),

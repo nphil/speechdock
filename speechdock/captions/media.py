@@ -8,7 +8,7 @@ import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from ..audio import RATE
+from ..audio import RATE, tool_failure
 
 DEFAULT_ROOTS = {"/tv": "/plex-media/tv", "/movies": "/plex-media/movies"}
 VIDEO_SUFFIXES = frozenset(".mkv .mp4 .m4v .avi .mov .webm .ts .m2ts .wmv .mpg .mpeg".split())
@@ -87,15 +87,17 @@ async def _run(command: list[str], watch: Callable[[], Awaitable[None]] | None =
         raise
 
 
-async def probe(path: Path) -> dict:
+async def probe(path: Path, timeout: float = 180) -> dict:
     """ffprobe summary: ``{"streams": [...], "duration": seconds | None}``."""
+    # Warning level, not error: an audio format FFmpeg cannot open (e.g. xHE-AAC) exits 1 and only
+    # explains itself with a warning-level line.
     code, out, err = await _run([
-        "ffprobe", "-v", "error", "-show_entries",
+        "ffprobe", "-v", "warning", "-show_entries",
         "stream=index,codec_type,codec_name,channels:stream_tags=language,title"
         ":stream_disposition=default,forced,comment,hearing_impaired,visual_impaired,descriptions,dub,original"
-        ":format=duration", "-of", "json", str(path)], timeout=180)
+        ":format=duration", "-of", "json", str(path)], timeout=timeout)
     if code:
-        raise MediaError("Could not read the video: " + err.decode(errors="replace").strip()[-300:])
+        raise MediaError(tool_failure("Could not read the video", "ffprobe", code, err))
     try:
         data = json.loads(out)
         duration = float(data.get("format", {}).get("duration", 0)) or None
@@ -116,10 +118,20 @@ def is_english(stream: dict) -> bool:
     return language_of(stream) in _ENGLISH
 
 
+_NO_LANGUAGE = frozenset({"", "und", "zxx", "mis", "mul"})
+
+
 def is_commentary(stream: dict) -> bool:
     disposition = stream.get("disposition") or {}
     return bool(disposition.get("comment") or disposition.get("descriptions") or disposition.get("visual_impaired")
                 or _COMMENTARY.search(tag(stream, "title")))
+
+
+def is_dub_situation(streams: list[dict]) -> bool:
+    """True when real audio (no commentary or description) has an English track and a tagged non-English one."""
+    languages = {language_of(s) for s in streams if s.get("codec_type") == "audio" and not is_commentary(s)}
+    english = bool(languages & _ENGLISH)
+    return english and bool(languages - _ENGLISH - _NO_LANGUAGE)
 
 
 def pick_english_audio(streams: list[dict]) -> dict | None:
@@ -165,7 +177,7 @@ async def extract(video: Path, audio: dict, tracks: list[dict], workdir: Path, d
     pcm = workdir / "audio.pcm"
 
     def command(with_tracks: list[dict]) -> list[str]:
-        result = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(video), "-map", f"0:{audio['index']}",
+        result = ["ffmpeg", "-nostdin", "-v", "warning", "-y", "-i", str(video), "-map", f"0:{audio['index']}",
                   "-vn", "-ac", "1", "-ar", str(RATE), "-f", "s16le", str(pcm)]
         for track in with_tracks:
             kind = TEXT_CODECS[track["codec_name"]]
@@ -183,7 +195,7 @@ async def extract(video: Path, audio: dict, tracks: list[dict], workdir: Path, d
         code, _, err = await _run(command([]), watch)
         tracks = []
     if code:
-        raise MediaError("Could not decode the English audio: " + err.decode(errors="replace").strip()[-300:])
+        raise MediaError(tool_failure("Could not decode the English audio", "ffmpeg", code, err))
     files = {}
     for track in tracks:
         path = workdir / f"sub{track['index']}.{TEXT_CODECS[track['codec_name']]}"

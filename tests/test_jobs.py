@@ -1,11 +1,13 @@
 import asyncio
 import io
+import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from speechdock.jobs import JobConflict, JobManager, QueueFull, UploadTooLarge
+from speechdock.jobs import MAX_RESTARTS, RESTART_GAVE_UP, JobConflict, JobManager, QueueFull, UploadTooLarge
 from speechdock.store import Store
 
 
@@ -80,17 +82,94 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         queued = await self.submit(encode=False)
         self.store.update_settings({"retention_days": 3})
         await self.manager.close()
-        self.assertEqual(self.store.get_job(first["id"])["status"], "failed")
+        # The job the shutdown cut short goes back in the queue with its audio instead of failing.
+        cut_short = self.store.get_job(first["id"])
+        self.assertEqual((cut_short["status"], cut_short["restarts"]), ("queued", 1))
+        self.assertTrue((self.manager.upload_dir / first["id"]).exists())
         self.assertEqual(self.store.get_job(queued["id"])["status"], "queued")
         self.store.close()
         self.store = Store(Path(self.temp.name))
         self.manager = JobManager(self.store, self.manager.processor)
         self.release.set()
         await self.manager.start()
+        self.assertEqual((await self.manager.wait(first["id"]))["result_text"], "subtitle")
         result = await self.manager.wait(queued["id"])
         self.assertEqual(result["result_text"], "subtitle")
+        self.assertEqual([call[0] for call in self.calls], [first["id"], first["id"], queued["id"]])
         self.assertEqual(self.calls[-1][1:], (False, b"audio"))
         self.assertEqual(self.store.get_settings()["retention_days"], 3)
+
+    def plant(self, job_id, status, *, restarts=0, task="transcribe", payload=None, audio=True):
+        """A job row (and its spooled audio) as a killed service would have left it."""
+        with self.store.db:
+            self.store.db.execute(
+                "INSERT INTO jobs(id,source,filename,task,language,model,encode,status,created_at,started_at,progress,restarts,payload) VALUES(?,?,?,?,?,?,1,?,?,?,0.4,?,?)",
+                (job_id, "bazarr", "ep.mkv", task, "en", "whisper-1", status, "2026-11-04T00:00:00+00:00", "2026-11-04T00:00:01+00:00", restarts, json.dumps(payload) if payload else None))
+        if audio:
+            (self.manager.upload_dir / job_id).write_bytes(b"audio")
+
+    async def test_a_crash_leaves_work_that_is_queued_again_but_never_forever(self):
+        await self.manager.close()
+        ids = {name: f"00000000-0000-4000-8000-00000000000{number}" for number, name in enumerate(
+            ("running", "tired", "cancelling", "lost", "caption", "stray"), 1)}
+        self.plant(ids["running"], "running")
+        self.plant(ids["tired"], "running", restarts=MAX_RESTARTS)
+        self.plant(ids["cancelling"], "cancelling")
+        self.plant(ids["lost"], "running", audio=False)
+        self.plant(ids["caption"], "running", task="captions", payload={"path": "/plex-media/tv/Show/Ep 1.mkv", "force": False}, audio=False)
+        self.plant(ids["stray"], "completed")  # an upload nothing waits for any more
+        (self.manager.upload_dir / f"{ids['running']}.pcm").write_bytes(b"half-decoded scratch")
+        gate = asyncio.Event()
+
+        async def hold(job, path, progress):
+            await gate.wait()
+            return {"result_text": "subtitle", "duration_seconds": 1}
+
+        self.manager = JobManager(self.store, hold)
+        await self.manager.start()
+        status = {name: self.store.get_job(job_id) for name, job_id in ids.items()}
+        self.assertEqual(status["running"]["restarts"], 1)
+        self.assertIn(status["running"]["status"], ("queued", "running"))
+        self.assertEqual((status["tired"]["status"], status["tired"]["error"]), ("failed", RESTART_GAVE_UP))
+        self.assertEqual((status["cancelling"]["status"], status["cancelling"]["error"]), ("cancelled", None))
+        self.assertEqual(status["lost"]["status"], "failed")
+        self.assertIn("audio was lost", status["lost"]["error"])
+        self.assertIn(status["caption"]["status"], ("queued", "running"))  # its input is just a path
+        self.assertEqual(status["caption"]["captions"]["path"], "/plex-media/tv/Show/Ep 1.mkv")
+        self.assertEqual(sorted(path.name for path in self.manager.upload_dir.iterdir()), [ids["running"]])
+        gate.set()
+        for name in ("running", "caption"):
+            self.assertEqual((await self.manager.wait(ids[name]))["status"], "completed")
+
+    async def test_a_job_cancelled_during_shutdown_is_not_run_again(self):
+        job = await self.submit()
+        await self.started.wait()
+        await self.manager.cancel(job["id"])
+        await self.manager.close()
+        self.assertEqual(self.store.get_job(job["id"])["status"], "cancelled")
+        self.assertFalse((self.manager.upload_dir / job["id"]).exists())
+
+    async def test_waiting_for_the_engine_checks_for_cancellation_without_touching_progress(self):
+        seen = []
+
+        async def waiting(job, path, progress):
+            await progress(0.5, 3)
+            await progress(None)  # what a job does each time it waits for the engine
+            seen.append(self.store.get_job(job["id"])["progress"])
+            self.started.set()
+            await self.release.wait()
+            await progress(None)
+            seen.append("not cancelled")
+            return {"result_text": "subtitle", "duration_seconds": 3}
+
+        self.manager.processor = waiting
+        job = await self.submit()
+        await self.started.wait()
+        self.assertEqual(seen, [0.5])
+        await self.manager.cancel(job["id"])
+        self.release.set()
+        self.assertEqual((await self.manager.wait(job["id"]))["status"], "cancelled")
+        self.assertEqual(seen, [0.5])
 
     async def test_retention_and_failure(self):
         async def broken(job, path, progress):
@@ -115,3 +194,18 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(waiter, return_exceptions=True)
         self.release.set()
         self.assertEqual((await self.manager.wait(job["id"]))["status"], "completed")
+
+
+class MigrationTests(unittest.TestCase):
+    def test_a_job_history_from_before_restart_counting_gains_the_column(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old = sqlite3.connect(Path(folder) / "speechdock.sqlite3")
+            old.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, source TEXT NOT NULL, filename TEXT NOT NULL, task TEXT NOT NULL, language TEXT NOT NULL, "
+                        "model TEXT NOT NULL, encode INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, "
+                        "progress REAL, duration_seconds REAL, error TEXT, result_text TEXT, result_json TEXT, payload TEXT)")
+            old.execute("INSERT INTO jobs(id,source,filename,task,language,model,encode,status,created_at) VALUES('a','bazarr','x.mkv','transcribe','en','m',1,'failed','2026-11-01T00:00:00+00:00')")
+            old.commit()
+            old.close()
+            store = Store(Path(folder))
+            self.assertEqual(store.get_job("a")["restarts"], 0)
+            store.close()

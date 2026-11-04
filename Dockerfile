@@ -15,8 +15,29 @@ RUN cc -shared -fPIC -O2 -Wall -Wextra -Werror -o /tmp/cuda-required.so /build/c
     && cc -O2 -Wall -Wextra -Werror -o /tmp/cuda-launch /build/cuda_launch.c -ldl \
     && python /build/prepare.py /tmp/crispasr.tar.gz /tmp/cuda-required.so /tmp/cuda-launch /opt/speechdock/runtime/crispasr-0.8.48-cuda12-1
 
+FROM python:3.12-slim-bookworm AS ffmpeg
+# Debian 12 ships FFmpeg 5.1, which cannot decode xHE-AAC (USAC, AAC object type 42). Build the official 8.1.3 release instead.
+# The sha256 is that of ffmpeg-8.1.3.tar.xz after its ffmpeg-8.1.3.tar.xz.asc signature was verified with gpg against the
+# FFmpeg release key FCF986EA15E6E293A5644F10B4322F04D67658D8 (https://ffmpeg.org/ffmpeg-devel.asc) on 2026-11-04.
+ADD --checksum=sha256:7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3 https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz /tmp/ffmpeg.tar.xz
+RUN apt-get update && apt-get install -y --no-install-recommends gcc make libc6-dev nasm xz-utils zlib1g-dev libbz2-dev liblzma-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir /tmp/ffmpeg-src && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-src --strip-components=1
+WORKDIR /tmp/ffmpeg-src
+# LGPL only, no auto-detected external libraries (only the zlib/bzip2/xz libraries the runtime image already ships), all
+# decoders/demuxers/parsers/filters, and only the encoders and muxers SpeechDock uses (raw PCM, WAV, SRT, ASS, WebVTT, null)
+# plus the lavfi test-signal input. configure silently ignores misspelled component names: check `ffmpeg -muxers` after edits.
+# Hardened like Debian's build; shared libraries (rpath /opt/ffmpeg/lib) so ffmpeg and ffprobe share one copy of the codecs.
+RUN ./configure --prefix=/opt/ffmpeg --toolchain=hardened --enable-shared --disable-static --enable-rpath \
+        --disable-autodetect --enable-zlib --enable-bzlib --enable-lzma \
+        --disable-ffplay --disable-doc --disable-debug \
+        --disable-encoders --enable-encoder=pcm_s16le,pcm_f32le,srt,subrip,ass,ssa,webvtt,wrapped_avframe \
+        --disable-muxers --enable-muxer=pcm_s16le,pcm_f32le,wav,srt,ass,webvtt,null \
+        --disable-indevs --enable-indev=lavfi --disable-outdevs \
+    && make -j"$(nproc)" install-progs
+
 FROM python:3.12-slim-bookworm AS runtime
-ARG VERSION=0.3.0
+ARG VERSION=0.3.1
 ARG REVISION=unknown
 ARG CREATED=unknown
 LABEL org.opencontainers.image.title="SpeechDock" \
@@ -33,8 +54,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     SPDOCK_ENGINE_URL=https://llama.nateshome.net \
     SPDOCK_ALIGNMENT_MODEL_DIR=/opt/speechdock/models/alignment \
     PATH=/app/.venv/bin:$PATH
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+COPY --from=ffmpeg /opt/ffmpeg /opt/ffmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
+    && ln -s /opt/ffmpeg/bin/ffmpeg /opt/ffmpeg/bin/ffprobe /usr/local/bin/ \
     && mkdir -p /app /data /models-owned /llama-config /etc/llama-swap \
     && ln -s /llama-config /etc/llama-swap/config \
     && chown 1000:1000 /data /models-owned /llama-config

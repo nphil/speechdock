@@ -287,6 +287,7 @@ class ModelManager:
                    "requires_language": False, "checksum_status": "pending", "runtime_ready": ids is not None and "whisper-1" in ids,
                    "runtime_error": None,
                    "installed": False, "verified": False, "registered": ids is not None and "whisper-1" in ids,
+                   "engine_reachable": ids is not None,
                    "read_only": True, "download": None, "can_register": False, "keep_loaded": None,
                    "warning": "Shared model; file ownership and integrity are not managed by SpeechDock."}]
         for entry in (*CATALOG.values(), *self._state["imports"].values()):
@@ -306,6 +307,7 @@ class ModelManager:
                 "runtime_ready": bool(runtime_info.get("available")), "runtime_error": runtime_info.get("error"),
                 "installed": entry["id"] in self._state["files"], "verified": verified,
                 "registered": ids is not None and entry["model_id"] in ids,
+                "engine_reachable": ids is not None,
                 "keep_loaded": (json.loads(self._state["registrations"][entry["id"]]).get("ttl") == 0
                                 if entry["id"] in self._state["registrations"] else None),
                 "read_only": False, "download": dict(download) if download else None,

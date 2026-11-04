@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from speechdock.app import app
-from speechdock.captions import Ledger
+from speechdock.captions import Ledger, media
 from speechdock.captions.routes import arr_paths
 from speechdock.jobs import JobManager, QueueFull
 from speechdock.store import Store
@@ -110,13 +110,36 @@ async def test_single_and_batch_endpoints_validate_paths_and_report_each_one(ser
         assert (await http.post("/api/captions/batch", json={"paths": []})).status_code == 422
 
 
-async def test_webhook_answers_tests_ignores_other_events_and_obeys_the_toggle(service):
+def dub_streams(*languages, **extra):
+    return [{"index": i, "codec_type": "audio", "codec_name": "aac", "tags": {"language": lang}, "disposition": {}, **extra}
+            for i, lang in enumerate(languages, 1)]
+
+
+@pytest.fixture
+def probed(monkeypatch):
+    """Replace ffprobe: ``probed.streams[file name]`` is its stream list or an exception to raise; ``probed.calls`` logs each probe."""
+    state = type("Probed", (), {"streams": {}, "calls": []})()
+
+    async def fake_probe(path, timeout=180):
+        state.calls.append((path.name, timeout))
+        result = state.streams[path.name]
+        if isinstance(result, Exception):
+            raise result
+        return {"streams": result, "duration": 60.0}
+
+    monkeypatch.setattr(media, "probe", fake_probe)
+    return state
+
+
+async def test_webhook_answers_tests_ignores_other_events_and_obeys_the_toggle(service, probed):
+    probed.streams["Ep 1.mkv"] = dub_streams("jpn", "eng")
     async with client() as http:
         assert (await http.post("/api/captions/webhook", json={"eventType": "Test"})).json()["status"] == "ok"
         assert (await http.post("/api/captions/webhook", json={"eventType": "Grab"})).json()["status"] == "ignored"
         assert (await http.post("/api/captions/webhook", content=b"not json")).status_code == 400
         off = await http.post("/api/captions/webhook", json=sonarr("/tv/Show/Ep 1.mkv"))
         assert off.status_code == 200 and off.json()["status"] == "disabled" and service.store.list_jobs()["total"] == 0
+        assert probed.calls == []  # nothing is probed while the toggle is off
         assert (await http.patch("/api/settings", json={"auto_captions": True})).json()["auto_captions"] is True
         for event in ("Download", "Upgrade"):
             reply = await http.post("/api/captions/webhook", json=sonarr("/tv/Show/Ep 1.mkv", event=event, isUpgrade=event == "Upgrade"))
@@ -127,6 +150,44 @@ async def test_webhook_answers_tests_ignores_other_events_and_obeys_the_toggle(s
         assert job["source"] == "webhook" and job["request"]["force"] is True
         outside = await http.post("/api/captions/webhook", json=sonarr("/etc/passwd"))
         assert outside.json()["rejected"][0]["path"] == "/etc/passwd"
+        assert [name for name, _ in probed.calls] == ["Ep 1.mkv", "Ep 1.mkv"]  # the outside path was never probed
+
+
+async def test_webhook_queues_only_dubs_and_reports_the_rest(service, probed):
+    probed.streams.update({
+        "Ep 1.mkv": dub_streams("jpn", "eng"),
+        "Ep 2.mkv": dub_streams("eng"),
+        "Ep 3.mkv": media.MediaError("Could not read the video: ffprobe exited with code 1 and no message"),
+    })
+    service.store.update_settings({"auto_captions": True})
+    async with client() as http:
+        payload = {"eventType": "Download", "series": {"path": "/tv/Show"},
+                   "episodeFiles": [{"relativePath": name} for name in ("Ep 1.mkv", "Ep 2.mkv", "Ep 3.mkv")]}
+        reply = await http.post("/api/captions/webhook", json=payload)
+    body = reply.json()
+    assert reply.status_code == 200 and body["status"] == "queued"
+    assert [item["path"].rsplit("/", 1)[-1] for item in body["queued"]] == ["Ep 1.mkv"] and body["already_queued"] == []
+    assert [item["path"].rsplit("/", 1)[-1] for item in body["skipped"]] == ["Ep 2.mkv"]
+    assert body["skipped"][0]["reason"] == "No English audio together with a non-English audio track (not a dub)"
+    assert [(item["path"].rsplit("/", 1)[-1], item["error"]) for item in body["rejected"]] == \
+        [("Ep 3.mkv", "Could not read the video: ffprobe exited with code 1 and no message")]
+    assert all(timeout == 30 for _, timeout in probed.calls)
+    assert service.store.list_jobs()["total"] == 1  # skipped and unreadable files were not queued
+    assert app.state.ledger.listing(50, 0, None)["total"] == 0
+
+
+async def test_a_skipped_import_can_still_be_captioned_by_hand_and_manual_requests_are_not_filtered(service, probed):
+    probed.streams["Ep 2.mkv"] = dub_streams("eng")
+    service.store.update_settings({"auto_captions": True})
+    async with client() as http:
+        skipped = await http.post("/api/captions/webhook", json=sonarr("/tv/Show/Ep 2.mkv"))
+        assert skipped.json()["skipped"] and skipped.json()["queued"] == []
+        manual = await http.post("/api/captions", json={"path": "/tv/Show/Ep 2.mkv"})
+        assert manual.status_code == 202 and manual.json()["captions"]["force"] is False
+        batch = await http.post("/api/captions/batch", json={"paths": ["/tv/Show/Ep 1.mkv"]})
+        assert [item["path"].rsplit("/", 1)[-1] for item in batch.json()["queued"]] == ["Ep 1.mkv"]
+        assert "skipped" not in batch.json()
+    assert [name for name, _ in probed.calls] == ["Ep 2.mkv"]  # only the webhook probes
 
 
 async def test_auto_captions_is_off_until_enabled_and_must_be_a_boolean(service):

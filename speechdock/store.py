@@ -40,12 +40,15 @@ class Store:
                 task TEXT NOT NULL, language TEXT NOT NULL, model TEXT NOT NULL,
                 encode INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
                 started_at TEXT, finished_at TEXT, progress REAL, duration_seconds REAL,
-                error TEXT, result_text TEXT, result_json TEXT, payload TEXT
+                error TEXT, result_text TEXT, result_json TEXT, payload TEXT, restarts INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, created_at);
         """)
-        if "payload" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}
+        if "payload" not in columns:
             self.db.execute("ALTER TABLE jobs ADD COLUMN payload TEXT")
+        if "restarts" not in columns:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN restarts INTEGER NOT NULL DEFAULT 0")
         self.db.execute(
             "INSERT OR IGNORE INTO settings(key,value) VALUES ('detection_model', COALESCE((SELECT value FROM settings WHERE key='transcription_model'), ?))",
             (json.dumps(DEFAULT_SETTINGS["detection_model"]),),
@@ -82,6 +85,9 @@ class Store:
             job.pop("encode")
             if detail and job["task"] == "detect":
                 job["detection"] = json.loads(result_json) if result_json else None
+            if detail and job["task"] in ("transcribe", "translate") and result_json:
+                # Windows whose engine reply failed the timing checks and how each was recovered (only if any were).
+                job["recovery"] = json.loads(result_json).get("recovery")
             if job["task"] == "captions":
                 report = json.loads(result_json) if result_json else {}
                 job["captions"] = {**(request or {}), **(report if detail else {key: report[key] for key in ("outcome", "cached", "matched") if key in report})}

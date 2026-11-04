@@ -1,3 +1,7 @@
+import os
+
+import pytest
+
 from speechdock.captions import media
 from speechdock.captions.media import english_text_tracks, language_of, pick_english_audio, sidecar_subtitles
 
@@ -90,3 +94,101 @@ def test_oversized_sidecar_is_ignored(tmp_path, monkeypatch):
     (tmp_path / "A.en.srt").write_text("12345")
     monkeypatch.setattr(media, "MAX_SIDECAR_BYTES", 3)
     assert sidecar_subtitles(video) == []
+
+
+def test_dub_situation_needs_english_and_a_tagged_non_english_audio_track():
+    assert media.is_dub_situation([audio(1, "jpn"), audio(2, "eng")])
+    assert media.is_dub_situation([audio(1, "ja"), audio(2, "en-US")])
+    assert media.is_dub_situation([audio(1, "eng"), audio(2, "fre"), audio(3, "ger")])  # more than two languages
+    assert media.is_dub_situation([audio(1, "eng"), audio(2, "eng", title="Commentary"), audio(3, "spa")])
+
+
+def test_english_only_or_foreign_only_audio_is_not_a_dub():
+    assert not media.is_dub_situation([audio(1, "eng"), audio(2, "eng")])
+    assert not media.is_dub_situation([audio(1, "jpn"), audio(2, "kor")])
+    assert not media.is_dub_situation([])
+    assert not media.is_dub_situation([subtitle(1, "eng"), subtitle(2, "jpn")])  # only audio streams count
+
+
+def test_commentary_and_description_tracks_count_for_neither_side():
+    assert not media.is_dub_situation([audio(1, "jpn"), audio(2, "eng", title="Director's Commentary")])
+    assert not media.is_dub_situation([audio(1, "jpn"), audio(2, "eng", descriptions=1)])
+    assert not media.is_dub_situation([audio(1, "eng"), audio(2, "jpn", comment=1)])
+    assert not media.is_dub_situation([audio(1, "eng"), audio(2, "fre", title="Audio Description")])
+
+
+def test_untagged_and_undetermined_audio_counts_as_neither_language():
+    assert not media.is_dub_situation([audio(1, "eng"), {"index": 2, "codec_type": "audio", "tags": {}, "disposition": {}}])
+    assert not media.is_dub_situation([audio(1, "eng"), {"index": 2, "codec_type": "audio"}])
+    for code in ("und", "zxx", "mis", "mul", ""):
+        assert not media.is_dub_situation([audio(1, "eng"), audio(2, code)]), code
+    assert not media.is_dub_situation([audio(1, "und"), audio(2, "jpn")])  # no English side
+    assert media.is_dub_situation([audio(1, "eng"), audio(2, "und"), audio(3, "jpn")])
+
+
+def fake_tool(tmp_path, monkeypatch, name, script):
+    """Put an executable ``name`` running the shell ``script`` first on PATH."""
+    path = tmp_path / "bin"
+    path.mkdir(exist_ok=True)
+    tool = path / name
+    tool.write_text("#!/bin/sh\n" + script + "\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{path}:{os.environ['PATH']}")
+
+
+async def test_probe_reports_the_exit_code_when_ffprobe_prints_nothing(tmp_path, monkeypatch):
+    fake_tool(tmp_path, monkeypatch, "ffprobe", "exit 1")
+    with pytest.raises(media.MediaError) as caught:
+        await media.probe(tmp_path / "x.mkv")
+    assert str(caught.value) == "Could not read the video: ffprobe exited with code 1 and no message"
+
+
+async def test_probe_error_carries_the_stderr_without_blank_lines_and_runs_at_warning_level(tmp_path, monkeypatch):
+    fake_tool(tmp_path, monkeypatch, "ffprobe",
+              'case "$*" in *"-v warning"*) ;; *) exit 9;; esac\n'
+              'printf "\\n[aac] Audio object type 42 is not implemented.\\n\\n  \\nInvalid data found when processing input\\n" >&2\nexit 1')
+    with pytest.raises(media.MediaError) as caught:
+        await media.probe(tmp_path / "x.mkv")
+    assert str(caught.value) == ("Could not read the video: ffprobe exited with code 1: "
+                                 "[aac] Audio object type 42 is not implemented.\nInvalid data found when processing input")
+
+
+async def test_probe_error_keeps_only_the_last_300_characters(tmp_path, monkeypatch):
+    fake_tool(tmp_path, monkeypatch, "ffprobe", 'i=0; while [ $i -lt 100 ]; do echo "noise line $i" >&2; i=$((i+1)); done; echo THE END >&2; exit 2')
+    with pytest.raises(media.MediaError) as caught:
+        await media.probe(tmp_path / "x.mkv")
+    message = str(caught.value)
+    assert message.endswith("noise line 99\nTHE END") and "exited with code 2: " in message
+    assert len(message.split(": ", 2)[2]) <= 300
+
+
+async def test_probe_returns_streams_and_duration_and_passes_the_timeout(tmp_path, monkeypatch):
+    fake_tool(tmp_path, monkeypatch, "ffprobe",
+              'echo \'{"streams": [{"index": 0, "codec_type": "audio"}], "format": {"duration": "12.5"}}\'\necho harmless warning >&2')
+    result = await media.probe(tmp_path / "x.mkv", timeout=30)
+    assert result == {"streams": [{"index": 0, "codec_type": "audio"}], "duration": 12.5}
+
+
+async def test_extract_error_carries_the_exit_code_and_stderr(tmp_path, monkeypatch):
+    fake_tool(tmp_path, monkeypatch, "ffmpeg", 'echo "Error while decoding stream #0:1: Invalid data found" >&2\nexit 183')
+
+    async def progress(_):
+        pass
+
+    with pytest.raises(media.MediaError) as caught:
+        await media.extract(tmp_path / "x.mkv", {"index": 1}, [], tmp_path, 10.0, progress)
+    assert str(caught.value) == ("Could not decode the English audio: ffmpeg exited with code 183: "
+                                 "Error while decoding stream #0:1: Invalid data found")
+    fake_tool(tmp_path, monkeypatch, "ffmpeg", "exit 1")
+    with pytest.raises(media.MediaError, match="ffmpeg exited with code 1 and no message"):
+        await media.extract(tmp_path / "x.mkv", {"index": 1}, [], tmp_path, 10.0, progress)
+
+
+async def test_extract_succeeds_when_ffmpeg_does_and_ignores_warnings(tmp_path, monkeypatch):
+    fake_tool(tmp_path, monkeypatch, "ffmpeg", 'for last; do :; done\nprintf "\\0\\0" > "$last"\necho "some warning" >&2')
+
+    async def progress(_):
+        pass
+
+    pcm, files, note = await media.extract(tmp_path / "x.mkv", {"index": 1}, [], tmp_path, 10.0, progress)
+    assert pcm.read_bytes() == b"\0\0" and files == {} and note is None
