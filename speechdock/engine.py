@@ -5,11 +5,12 @@ import math
 import textwrap
 import unicodedata
 import wave
+from dataclasses import dataclass
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
-from .audio import Cue, render
+from .audio import Cue, parse_srt, render
 from .languages import LANGUAGES, normalize_language
 
 
@@ -216,6 +217,94 @@ def _canary_word_cues(payload: dict, duration: float) -> list[Cue]:
 
 
 
+@dataclass(frozen=True)
+class Word:
+    """One recognized word: engine-reported onset/end in seconds, and its confidence."""
+    start: float
+    end: float
+    text: str
+    confidence: float = 1.0
+
+
+def _parakeet_words(payload: dict, duration: float) -> tuple[list[Word], int]:
+    """Read native Parakeet tokens as timed words for caption building.
+
+    ``_parakeet_token_cues`` rejects a whole window when one token interval is empty or
+    overlapping, which suits Bazarr's strict contract but fails real episodes. Captions
+    need the words, so text is never altered and unusable intervals are repaired to a
+    monotone sequence inside the audio; each repair is counted. Punctuation stays in
+    the text but never sets a word's timing.
+    """
+    if (not isinstance(payload, dict) or payload.get("backend") != "parakeet"
+            or not isinstance(payload.get("segments"), list)):
+        raise ValueError("Invalid native Parakeet response")
+    found = []
+    for segment in payload["segments"]:
+        tokens = segment.get("tokens") if isinstance(segment, dict) else None
+        if tokens is None and isinstance(segment, dict) and not str(segment.get("text", "")).strip():
+            continue
+        if not isinstance(tokens, list):
+            raise ValueError("Native Parakeet segment is missing tokens")
+        word, leading, boundary = None, "", True
+        for token in tokens:
+            if not isinstance(token, dict) or not isinstance(token.get("text"), str):
+                raise ValueError("Invalid native Parakeet token")
+            raw = token["text"]
+            if raw.isspace():
+                boundary = True
+                continue
+            if raw.startswith(" "):
+                boundary = True
+            raw = "".join(raw.split())
+            if not raw:
+                continue
+            if all(unicodedata.category(char).startswith("P") for char in raw):
+                opening = all(unicodedata.category(char) in {"Ps", "Pi"} or char in "\"'" for char in raw)
+                if word is None or leading or (boundary and opening):
+                    leading += raw
+                else:
+                    word["text"] += raw
+                continue
+            if boundary and word is not None:
+                found.append(word)
+                word = None
+            start, end = token.get("t0"), token.get("t1")
+            if any(type(t) not in (int, float) or not math.isfinite(t) for t in (start, end)):
+                start = end = word["end"] if word else (found[-1]["end"] if found else 0)
+            score = token.get("confidence")
+            score = float(score) if type(score) in (int, float) and math.isfinite(score) else 1.0
+            if word is None:
+                word = {"text": "", "start": start, "end": end, "scores": []}
+            word["text"] += leading + raw
+            word["start"], word["end"] = min(word["start"], start), max(word["end"], end)
+            word["scores"].append(score)
+            leading, boundary = "", False
+        if word is not None:
+            found.append(word)
+    words, repairs, previous_end = [], 0, 0.0
+    for item in found:
+        start = min(max(item["start"] / 1000, previous_end), duration)
+        end = min(max(item["end"] / 1000, start + 0.04), duration)
+        repairs += abs(start - item["start"] / 1000) > 0.001 or abs(end - item["end"] / 1000) > 0.001
+        words.append(Word(start, end, item["text"], sum(item["scores"]) / len(item["scores"])))
+        previous_end = end
+    return words, repairs
+
+
+def words_from_cues(cues: list[Cue]) -> list[Word]:
+    """Spread each cue's words across its interval, for models without word timing."""
+    words = []
+    for cue in cues:
+        parts = cue.text.split()
+        total = sum(len(part) + 1 for part in parts)
+        position = cue.start_ms
+        for part in parts:
+            end = position + (cue.end_ms - cue.start_ms) * (len(part) + 1) / total
+            words.append(Word(position / 1000, end / 1000, part))
+            position = end
+    return words
+
+
 def _wrap_cue(text: str) -> str:
     return "\n".join(textwrap.wrap(text.strip(), width=42, break_long_words=False, break_on_hyphens=False))
 
@@ -266,6 +355,31 @@ class Engine:
         except httpx.HTTPError as exc:
             raise EngineError(f"Speech engine request failed: {type(exc).__name__}") from exc
 
+    def _crisp_fields(self, language: str) -> dict:
+        fields = {"language": language, "response_format": "verbose_json",
+                  "require_word_timestamps": "true", "no_auto_aligner": "true",
+                  "lid_backend": "off", "translate": "false"}
+        if self.architecture == "canary":
+            fields.update(source_lang=language, target_lang=language)
+        return fields
+
+    async def transcribe_words(self, wav: bytes, model: str, language: str) -> tuple[list[Word], int]:
+        """Recognize one bounded window as timed words, in seconds from the window start.
+
+        Parakeet gives real word timing (repaired where unusable, see ``_parakeet_words``).
+        Other models fall back to their cue-level subtitles with word times spread over each
+        cue. The second value counts repaired intervals.
+        """
+        if (self.runtime, self.architecture) != ("crispasr", "parakeet"):
+            return words_from_cues(parse_srt(await self.transcribe(wav, model, language, "transcribe"))), 0
+        response = await self._request(wav, model, self._crisp_fields(normalize_language(language)))
+        try:
+            with wave.open(io.BytesIO(wav), "rb") as source:
+                duration = source.getnframes() / source.getframerate()
+            return _parakeet_words(response.json(), duration)
+        except (ValueError, wave.Error, EOFError) as exc:
+            raise EngineError(str(exc)) from exc
+
     async def transcribe(self, wav: bytes, model: str, language: str, task: str) -> str:
         if task not in {"transcribe", "translate"}:
             raise EngineError("Unsupported speech task")
@@ -275,11 +389,7 @@ class Engine:
                 raise EngineError("Translated CrispASR subtitle timings have not been validated; use a translation-capable Whisper model")
             if self.architecture == "canary" and language == "auto":
                 raise EngineError("Canary requires an explicit source language")
-            fields = {"language": language, "response_format": "verbose_json",
-                      "require_word_timestamps": "true", "no_auto_aligner": "true",
-                      "lid_backend": "off", "translate": "false"}
-            if self.architecture == "canary":
-                fields.update(source_lang=language, target_lang=language)
+            fields = self._crisp_fields(language)
         else:
             fields = {"language": language, "response_format": "verbose_json", "no_timestamps": "false", "token_timestamps": "true", "max_len": "84", "split_on_word": "true"}
             if task == "translate":

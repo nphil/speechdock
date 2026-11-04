@@ -25,6 +25,7 @@ from .languages import normalize_language
 from .models import ModelError, ModelManager
 from .store import Store
 from .alignment import alignment_lifespan, attach_alignment_routes
+from .captions import Ledger, attach_caption_routes, run_caption_job
 
 DATA_DIR = Path(os.environ.get("SPDOCK_DATA_DIR", "/data"))
 FRONTEND_DIR = Path(os.environ.get("SPDOCK_FRONTEND_DIR", "ui/dist"))
@@ -65,6 +66,7 @@ class SettingsPatch(BaseModel):
     max_upload_mb: int | None = Field(default=None, ge=1, le=10240, strict=True)
     retention_days: int | None = Field(default=None, ge=1, le=3650, strict=True)
     default_language: str | None = None
+    auto_captions: bool | None = Field(default=None, strict=True)
 
     @field_validator("engine_url")
     @classmethod
@@ -122,8 +124,15 @@ async def lifespan(app: FastAPI):
         store.update_settings({"engine_url": normalized})
     models = ModelManager(DATA_DIR, store.get_settings)
     app.state.store, app.state.models = store, models
+    app.state.ledger = Ledger(store.db)
+    shutil.rmtree(DATA_DIR / "captions-work", ignore_errors=True)
 
     async def process(job: dict, path: Path, progress):
+        if job["task"] == "captions":
+            caption_model = await model_for(app, job["model"], "transcribe")
+            return await run_caption_job(
+                job=job, progress=progress, ledger=app.state.ledger, workdir=DATA_DIR / "captions-work",
+                engine=Engine(store.get_settings(), runtime=caption_model["runtime"], architecture=caption_model["architecture"]))
         item = await model_for(app, job["model"], job["task"])
         settings = store.get_settings()
         if item.get("requires_language") and job["language"] == "auto":
@@ -182,6 +191,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SpeechDock", version=__version__, lifespan=lifespan)
 attach_alignment_routes(app)
+attach_caption_routes(app, model_for)
 
 
 @app.exception_handler(RequestValidationError)

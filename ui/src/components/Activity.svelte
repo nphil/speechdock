@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type Job } from '../api';
+  import { api, type CaptionOutcome, type Job } from '../api';
   import JobDetail from './JobDetail.svelte';
 
   export let onChanged: (() => void) | undefined = undefined;
@@ -55,6 +55,7 @@
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
   }
+  const outcomes: Record<CaptionOutcome, string> = { written: 'captions written', matched_existing: 'skipped: real captions exist', already_generated: 'already generated', no_english_audio: 'no English audio', no_speech: 'no speech found' };
 </script>
 
 <section class="activity" aria-label="Activity">
@@ -68,7 +69,7 @@
       {:else}
         <div class="rows">{#each items as job (job.id)}
           <button type="button" class="row" class:selected={selected === job.id} aria-pressed={selected === job.id} onclick={() => selected = job.id}>
-            <span class="row-main"><strong>{job.filename}</strong><span>{job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'} · {date(job.created_at)}</span></span>
+            <span class="row-main"><strong>{job.filename}</strong><span>{job.task === 'captions' ? 'Dub captions' : job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'} · {date(job.created_at)}{#if job.captions?.outcome} · {outcomes[job.captions.outcome]}{/if}</span></span>
             <span class="status" class:complete={job.status === 'completed'} class:failed={job.status === 'failed'}>{job.status}{#if job.status === 'running' && job.progress != null} · {Math.round(job.progress * 100)}%{/if}</span>
           </button>
         {/each}</div>

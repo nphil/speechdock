@@ -4,7 +4,7 @@ A local speech-to-subtitles workspace for Bazarr and other clients. SpeechDock h
 
 One CPU-only app container. The existing llama-swap service launches model servers on demand; SpeechDock itself needs neither GPU access, a Docker socket nor a production Node.js runtime.
 
-Version 0.2.2 preserves quiet subtitle audio and consumes Parakeet’s native lexical token intervals without stretching words to delayed punctuation. Owned registrations can retain a resident English model while other speech models remain on demand. The optional CPU known-text aligner is separate from speech recognition; backend or local client proof does not establish actual TV consumption.
+Version 0.3.0 adds **dub captions**: SpeechDock transcribes a video's English audio, repairs names from the file's own subtitle and writes `<video>.en.cc.srt` beside it, unless a real dub caption already exists. Earlier releases preserve quiet subtitle audio and consume Parakeet’s native lexical token intervals without stretching words to delayed punctuation. Owned registrations can retain a resident English model while other speech models remain on demand. The optional CPU known-text aligner is separate from speech recognition; backend or local client proof does not establish actual TV consumption.
 
 ## Use it
 
@@ -12,6 +12,7 @@ Version 0.2.2 preserves quiet subtitle audio and consumes Parakeet’s native le
 - **New transcription:** upload audio or video, keep its spoken language or translate it into English.
 - **Models:** download checksum-verified Whisper models, apply them to llama-swap, and remove only SpeechDock-owned models.
 - **Settings:** choose the engine, transcription and translation models, language, timeouts, upload limit and history retention.
+- **Dub captions:** caption a video's English dub from the API, a batch or an automatic Sonarr/Radarr webhook; see [Dub captions](#dub-captions).
 
 For a compact setup, keep Parakeet Q5 resident for qualified English voice/subtitle work and full Whisper Large-v3 Q5 on demand for multilingual transcription, English translation and language detection. Choose registered models in Settings; an engine alias alone does not mean a model is installed. Whisper Turbo cannot translate. SpeechDock never silently substitutes Turbo for a translation model or a transcription backend for the separately selected detection model.
 
@@ -25,8 +26,11 @@ Use [`unraid/speechdock.xml`](unraid/speechdock.xml). The image is `ghcr.io/nphi
 | `/models-owned` | `/mnt/nvme/appdata/llama-models/whisper/speechdock` | Read/write, UID/GID 1000 |
 | `/llama-config` | `/mnt/nvme/appdata/llama-swap` | Read/write directory containing `config.yaml` |
 | `/validator/llama-swap` | `/mnt/nvme/appdata/speechdock/tools/llama-swap` | Read-only executable file |
+| `/plex-media/tv`, `/plex-media/movies` | the TV and movie library folders | Read/write for dub captions (UID 1000 must be able to create files); read-only is enough for Marquee alignment alone |
 
 The existing llama-swap mount exposes the owned-model folder as `/models/whisper/speechdock`. Do not mount a different folder on one side: downloading a model would succeed but the engine could not open it.
+
+The two media mounts are optional. Dub captions create `<video base>.en.cc.srt` beside each video, so the mount must be **read-write** and the container user (UID 1000) must be able to create files in the show folders. Verify it with a real write before a batch run; a read-only or unwritable folder fails the job immediately with an explanation instead of after transcription.
 
 The validator must be an executable copy of **the exact llama-swap binary deployed on that host**, not a guessed version. Refresh the copy after upgrading llama-swap. Configuration updates use same-directory temporary files, validation, backups and atomic replacement. Both the configuration directory and file need compatible UID/GID 1000 permissions; back up their original ownership and modes before preparing them. Do not recursively change ownership of unrelated models or app data.
 
@@ -104,17 +108,56 @@ The optional `POST /api/alignment/windows` service, introduced in 0.2.0, aligns 
 
 Version 0.2.1 preserves the raw independently recognized CTC tokens for acoustic scoring, avoiding false weak-acoustic rejection when normalization removes boundary or repeated separators. Exact independent lexical equality and all token-score, source, hash, bounds and playback/seek epoch guards remain unchanged. On the same 19 retained film windows, alignment improved from 1 to 2; the other 17 remained estimated because of lexical mismatch. Audio context, translation and model defaults are unchanged. The selected speech-to-text model does not replace the separate CPU known-text aligner.
 
-For a fresh installation, configure these trusted server-side variables and mount media **read-only** before enabling the client endpoint. An already-configured production installation does not need these settings re-entered just for this update:
+For a fresh installation, configure these trusted server-side variables and mount media before enabling the client endpoint (alignment itself only reads; dub captions need the same mounts read-write). An already-configured production installation does not need these settings re-entered just for this update:
 
 - `SPDOCK_ALIGNMENT_PLEX_URL`: the trusted Plex server origin, without token, query or path.
 - `SPDOCK_ALIGNMENT_PLEX_TOKEN_FILE`: a private readable token file; never send it from the client or include it in a URL.
-- `SPDOCK_ALIGNMENT_ROOTS`: JSON mappings such as `[{"plex":"/PMS/movies","local":"/media/movies"}]` matching Plex paths to read-only container mounts.
+- `SPDOCK_ALIGNMENT_ROOTS`: JSON mappings such as `[{"plex":"/PMS/movies","local":"/media/movies"}]` matching Plex paths to container mounts.
 - `SPDOCK_ALIGNMENT_MODEL_DIR`: `/opt/speechdock/models/alignment` in the packaged image. Its model, vocabulary, configuration, provenance and Apache-2.0 license are baked in and checksummed; requests never download assets.
 
 Missing configuration does not break ordinary SpeechDock jobs: alignment reports an explicit estimated result. Alignment admits one active CPU request and one waiting request, uses bounded windows and has no persistent result cache. Marquee diagnostics require separate session-only consent and default off. Local fixtures prove real CPU alignment and Rust HTTP exchange, including stale-generation rejection; they do not by themselves prove TV activation or deployment.
 
 A non-null `source_revision` means the source was verified, not that a cue was acoustically aligned. Consumers must check each cue’s `status`, use word timings only for `aligned` cues, and clear previously accepted timings when a cue falls back to `estimated` or its source changes. Strict acoustic checks can reject ordinary film dialogue even with correct server configuration; an estimated response is not positive alignment proof.
 
+
+## Dub captions
+
+Some releases carry an English dub beside the original audio but only translation subtitles, so Plex offers subtitles that do not match what is said. A dub caption job transcribes the file's **English audio** and writes `<video base>.en.cc.srt` next to the video, which Plex lists as English (CC). Nothing else about the library changes.
+
+For each video SpeechDock:
+
+1. **Picks the English audio stream:** the default English stream, never commentary or audio description. A file with no English audio is skipped.
+2. **Reads the file once** for that audio and every embedded English text subtitle. Bitmap tracks (PGS, VobSub) cannot be read and are not scored.
+3. **Transcribes** with the configured transcription model (Parakeet), in windows cut at quiet points rather than mid-word, and cleans the result: looped repetitions collapse, words squeezed into the last frames of a cut-off window are dropped, and stretches the model was unsure of (singing, effects) are dropped.
+4. **Skips real captions.** Every English subtitle, embedded or beside the video, is scored against the transcript: the F1 of how many of the track's words are heard near their cue and how many spoken words the track carries, so a translation, a truncated track and a badly out-of-sync track all fail. A track at 0.75 or better is a real dub caption: nothing is written and the matching track is recorded. On the library this was calibrated on, dub captions scored 0.91-0.95 and translations 0.31-0.62. This also skips English-original shows that merely carry a foreign dub.
+5. **Repairs names.** Parakeet takes no vocabulary prompt, so names it has not seen come back phonetically spelled. Names from the same file's English subtitle (embedded or `.en.srt`) correct them afterwards: a capitalized token the speaker never says in lowercase, one or two letters from a known name and either repeated or low-confidence, is replaced; ordinary words are left alone.
+6. **Builds cues and publishes atomically:** at most two lines of 42 characters, split at sentence ends and pauses, stretched to a 20 characters-per-second reading speed without overlapping the next cue, written through a temporary file in the same folder.
+
+**Never overwrites what it did not write.** SpeechDock records every caption file it creates with its checksum. A file it did not create, or one a person edited afterwards, is never replaced, even when forced: if a file named `.en.cc.srt` already agrees with the audio it counts as real captions, otherwise the job fails with an explanation and leaves it alone. A rerun keeps SpeechDock's own file unless `force` is set; only then is it replaced. Earlier decisions (skipped, no English audio, no speech) are reused until the video file changes.
+
+| Outcome | Meaning |
+| --- | --- |
+| `written` | `<base>.en.cc.srt` was created (or replaced with `force`). |
+| `matched_existing` | An existing English track agrees with the audio. Nothing written; the matching track and scores are recorded. The transcript is kept in the job for review only. |
+| `already_generated` | SpeechDock's own file is there and `force` was not set. |
+| `no_english_audio` / `no_speech` | There is nothing to caption. These are not failures. |
+
+### Dub caption API
+
+```sh
+# One video (a path inside the media mounts)
+curl -X POST -H 'Content-Type: application/json' -d '{"path":"/plex-media/tv/Show/Season 1/Show - S01E01.mkv"}' \
+  https://speechdock.nateshome.net/api/captions
+# Many videos: reports each as queued, already queued or rejected
+curl -X POST -H 'Content-Type: application/json' -d '{"paths":["/plex-media/tv/…","/plex-media/movies/…"],"force":false}' \
+  https://speechdock.nateshome.net/api/captions/batch
+# What was decided per video (filters: outcome, path, limit, offset)
+curl 'https://speechdock.nateshome.net/api/captions?outcome=matched_existing'
+```
+
+Paths must be inside the media mounts (`/plex-media/tv`, `/plex-media/movies`); other paths, symlinks leaving them and non-video files are rejected. Caption jobs appear in Activity with their report: audio stream used, every subtitle compared with its scores, name corrections and timings. They run **serially behind Bazarr and uploaded jobs** (a caption batch never uses up their queue limit), up to 5,000 waiting.
+
+**Automatic captions.** Turn on *Create dub captions for new imports* in Settings, then add a Connect → Webhook in Sonarr and Radarr with the address `https://speechdock.nateshome.net/api/captions/webhook`, method POST, triggers **On Import** and **On Upgrade**. Imported files are queued (an import means a caption SpeechDock wrote for an earlier file at that path is stale, so it is replaced; files it did not write never are). With the setting off the webhook still answers 200 and queues nothing, and the *arr Test button works either way. `SPDOCK_CAPTION_ROOTS` maps the library paths Sonarr and Radarr report to the mounts (default `{"/tv": "/plex-media/tv", "/movies": "/plex-media/movies"}`).
 
 ## Processing and storage
 
@@ -137,7 +180,7 @@ curl -F file=@recording.flac -F task=transcribe -F language=auto \
 
 The response is a queued job. Read `GET /api/jobs/{id}` for status and download `GET /api/jobs/{id}/result?format=srt` after completion. Detection-job detail includes `detection: {language_code, detected_language}`. Failures return real error statuses/messages, not empty fake subtitle files.
 
-Settings are persisted after the first start. `SPDOCK_ENGINE_URL` supplies the initial engine URL; change saved settings in the UI afterward. Advanced deployment variables include `SPDOCK_DATA_DIR`, `SPDOCK_MODELS_DIR`, `SPDOCK_LLAMA_CONFIG`, `SPDOCK_ENGINE_MODELS_DIR`, `SPDOCK_LLAMA_VALIDATOR`, `SPDOCK_VAD_MODEL` and `SPDOCK_FRONTEND_DIR`. The production image bundles the read-only VAD model at `/opt/speechdock/models/silero-vad-v5.1.onnx`; it never downloads models on a transcription request.
+Settings are persisted after the first start. `SPDOCK_ENGINE_URL` supplies the initial engine URL; change saved settings in the UI afterward. Advanced deployment variables include `SPDOCK_DATA_DIR`, `SPDOCK_MODELS_DIR`, `SPDOCK_LLAMA_CONFIG`, `SPDOCK_ENGINE_MODELS_DIR`, `SPDOCK_LLAMA_VALIDATOR`, `SPDOCK_VAD_MODEL`, `SPDOCK_FRONTEND_DIR` and `SPDOCK_CAPTION_ROOTS`. The production image bundles the read-only VAD model at `/opt/speechdock/models/silero-vad-v5.1.onnx`; it never downloads models on a transcription request.
 
 ## Development
 

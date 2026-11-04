@@ -22,6 +22,7 @@ DEFAULT_SETTINGS = {
     "max_upload_mb": 1024,
     "retention_days": 14,
     "default_language": "auto",
+    "auto_captions": False,
 }
 
 
@@ -39,10 +40,12 @@ class Store:
                 task TEXT NOT NULL, language TEXT NOT NULL, model TEXT NOT NULL,
                 encode INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
                 started_at TEXT, finished_at TEXT, progress REAL, duration_seconds REAL,
-                error TEXT, result_text TEXT, result_json TEXT
+                error TEXT, result_text TEXT, result_json TEXT, payload TEXT
             );
             CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, created_at);
         """)
+        if "payload" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN payload TEXT")
         self.db.execute(
             "INSERT OR IGNORE INTO settings(key,value) VALUES ('detection_model', COALESCE((SELECT value FROM settings WHERE key='transcription_model'), ?))",
             (json.dumps(DEFAULT_SETTINGS["detection_model"]),),
@@ -66,13 +69,22 @@ class Store:
         job = dict(row)
         job["result_available"] = job["status"] == "completed" and (job["result_text"] is not None or job["result_json"] is not None)
         result_json = job.pop("result_json")
+        payload = job.pop("payload")
+        request = json.loads(payload) if payload else None
+        if job["task"] == "captions":
+            # The report lives in result_json; there is downloadable text only when captions were produced.
+            job["result_available"] = job["status"] == "completed" and job["result_text"] is not None
         if internal:
             job["encode"] = bool(job["encode"])
             job["result_json"] = json.loads(result_json) if result_json else None
+            job["request"] = request
         else:
             job.pop("encode")
             if detail and job["task"] == "detect":
                 job["detection"] = json.loads(result_json) if result_json else None
+            if job["task"] == "captions":
+                report = json.loads(result_json) if result_json else {}
+                job["captions"] = {**(request or {}), **(report if detail else {key: report[key] for key in ("outcome", "cached", "matched") if key in report})}
         if not detail:
             job.pop("result_text")
         return job

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-11-03
+
+- Add dub captions. A job takes a video inside the media mounts, picks its English audio stream (the default English stream, never commentary), transcribes it with the configured transcription model in windows cut at quiet points, cleans the transcript (looped repetitions, words squeezed into the last frames of a window and low-confidence stretches such as singing are dropped), repairs misspelled names from the same file's English subtitle, builds cues of at most two 42-character lines at a 20 characters-per-second reading speed and publishes `<video base>.en.cc.srt` atomically beside the video, which Plex lists as English (CC).
+- Skip real captions. Every English subtitle, embedded or beside the video, is scored against the transcript (F1 of how many of its words are heard near their cue and how many spoken words it carries). A track at 0.75 or better is a real dub caption: nothing is written and the matching track and scores are recorded. Measured on real episodes, dub captions scored 0.91-0.95 and translation tracks 0.31-0.62; a truncated or out-of-sync track also fails. English-original shows with a foreign dub are skipped by the same test.
+- Never overwrite what SpeechDock did not write. Each written file is recorded with its checksum; a file it did not create, or one edited afterwards, is never replaced, even when forced. A rerun keeps SpeechDock's own file unless forced. Earlier skip decisions are reused until the video changes. `GET /api/captions` lists the decisions.
+- Add `POST /api/captions`, `POST /api/captions/batch` and a Sonarr/Radarr webhook (`POST /api/captions/webhook`, On Import and On Upgrade) with an auto-captions switch in Settings, off by default. Caption jobs show in Activity with their report and run serially behind Bazarr and uploaded jobs; a caption batch never uses up their queue limit.
+- Read Parakeet tokens tolerantly for captions: overlapping or empty token intervals, which fail a whole window in the strict subtitle path used for Bazarr, are repaired and counted. The strict path is unchanged.
+- The Unraid template mounts the media folders read-write so captions can be created beside the videos.
+
 ## 0.2.2 — 2026-11-02
 
 - Preserve quiet film dialogue by sending every non-digitally-silent, bounded audio window for transcription and translation. Silero remains a language-detection aid, not a filter that can silently discard subtitle audio.

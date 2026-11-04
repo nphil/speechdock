@@ -1,12 +1,26 @@
-export type Task = 'transcribe' | 'translate' | 'detect';
+export type Task = 'transcribe' | 'translate' | 'detect' | 'captions';
 export type JobStatus = 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+export type CaptionOutcome = 'written' | 'matched_existing' | 'already_generated' | 'no_english_audio' | 'no_speech';
+export interface CaptionCandidate { source: 'embedded' | 'sidecar'; label: string; stream?: number; title?: string; file?: string; codec?: string; cues: number; agreement: number; precision: number; recall: number }
+export interface CaptionInfo {
+  path: string; force: boolean; outcome?: CaptionOutcome; cached?: boolean; matched?: CaptionCandidate | null;
+  file?: string; sidecar?: string; threshold?: number; model?: string;
+  audio?: { index: number; language: string; title: string; codec: string | null; channels: number | null; default: boolean; duration_seconds: number | null } | null;
+  transcript?: { windows: number; words: number; cues: number; dropped: { compressed: number; unsure: number; loops: number }; timing_repairs: number } | null;
+  candidates?: CaptionCandidate[];
+  glossary?: { terms: number; sample: string[]; corrections: { heard: string; name: string; count: number }[] } | null;
+  output?: { file: string; bytes: number; cues: number; sha256: string; replaced: boolean } | null;
+  note?: string | null;
+  timings?: { probe?: number; extract?: number; transcribe?: number; analyse?: number; total?: number };
+}
 export interface Job {
-  id: string; source: 'bazarr' | 'upload' | 'api'; filename: string; task: Task; language: string; model: string; status: JobStatus;
+  id: string; source: 'bazarr' | 'upload' | 'api' | 'captions' | 'webhook'; filename: string; task: Task; language: string; model: string; status: JobStatus;
   created_at: string; started_at: string | null; finished_at: string | null; progress: number | null; duration_seconds: number | null;
   error: string | null; result_available: boolean; result_text?: string | null;
   detection?: { language_code: string; detected_language: string } | null;
+  captions?: CaptionInfo;
 }
-export interface Settings { engine_url: string; transcription_model: string; translation_model: string; detection_model: string; inference_timeout_seconds: number; connect_timeout_seconds: number; max_upload_mb: number; retention_days: number; default_language: string }
+export interface Settings { engine_url: string; transcription_model: string; translation_model: string; detection_model: string; inference_timeout_seconds: number; connect_timeout_seconds: number; max_upload_mb: number; retention_days: number; default_language: string; auto_captions: boolean }
 export interface Download { id: string; status: string; received_bytes: number; total_bytes: number | null; progress: number | null; error: string | null }
 export interface Model { id: string; name: string; description: string; model_id: string; filename: string | null; size_bytes: number | null; sha256: string | null; multilingual: boolean; translation_capable: boolean; quality: string | null; speed: string | null; installed: boolean; verified: boolean; registered: boolean; read_only: boolean; download: Download | null; can_register: boolean; warning: string; runtime: string | null; architecture: string | null; format: string | null; source: string; source_host: string | null; source_filename: string | null; language_detection_capable: boolean; requires_language: boolean; checksum_status: string; runtime_ready: boolean; runtime_error: string | null }
 export interface ImportRequest { name: string; source: 'upload' | 'url'; url?: string; expected_sha256?: string; expected_size_bytes?: number; source_filename?: string }

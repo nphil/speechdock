@@ -16,7 +16,7 @@ RUN cc -shared -fPIC -O2 -Wall -Wextra -Werror -o /tmp/cuda-required.so /build/c
     && python /build/prepare.py /tmp/crispasr.tar.gz /tmp/cuda-required.so /tmp/cuda-launch /opt/speechdock/runtime/crispasr-0.8.48-cuda12-1
 
 FROM python:3.12-slim-bookworm AS runtime
-ARG VERSION=0.2.2
+ARG VERSION=0.3.0
 ARG REVISION=unknown
 ARG CREATED=unknown
 LABEL org.opencontainers.image.title="SpeechDock" \

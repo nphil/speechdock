@@ -15,10 +15,12 @@
   let theme: 'system' | 'light' | 'dark' = 'system';
   let endpoint = '';
   let copied = '';
+  let webhookCopied = '';
   let disposed = false;
 
   const message = (reason: unknown) => reason instanceof Error ? reason.message : 'Something went wrong. Please try again.';
   $: transcriptionModels = models.filter(model => model.registered);
+  $: webhook = endpoint + '/api/captions/webhook';
   $: translationModels = models.filter(model => model.registered && model.translation_capable);
   $: detectionModels = models.filter(model => model.registered && model.language_detection_capable);
 
@@ -59,6 +61,11 @@
   async function copyEndpoint() {
     try { await navigator.clipboard.writeText(endpoint); copied = 'Copied.'; }
     catch { copied = 'Could not copy automatically. Select and copy the address instead.'; }
+  }
+
+  async function copyWebhook() {
+    try { await navigator.clipboard.writeText(webhook); webhookCopied = 'Copied.'; }
+    catch { webhookCopied = 'Could not copy automatically. Select and copy the address instead.'; }
   }
 
   onMount(() => {
@@ -123,6 +130,16 @@
           <div class="columns"><label>Maximum upload <span>MB</span><input type="number" required min="1" max="10240" step="1" bind:value={settings.max_upload_mb} /></label><label>History retention <span>days</span><input type="number" required min="1" max="3650" step="1" bind:value={settings.retention_days} /></label></div>
         </div>
       </section>
+      <section class="group" aria-labelledby="captions-heading">
+        <div class="group-intro"><h2 id="captions-heading">Dub captions</h2><p>Create English captions from a video's English audio when Sonarr or Radarr imports it.</p></div>
+        <div class="fields">
+          <label class="toggle"><input type="checkbox" bind:checked={settings.auto_captions} /><span><strong>Create dub captions for new imports</strong>When on, Sonarr/Radarr imports and upgrades sent to the webhook below are queued behind Bazarr requests and captioned from the English audio. Files SpeechDock did not create are never overwritten.</span></label>
+          <label for="captions-webhook">Webhook address</label>
+          <div class="copy-row"><input id="captions-webhook" value={webhook} readonly onclick={(event) => event.currentTarget.select()} /><button type="button" class="secondary" onclick={copyWebhook} disabled={!endpoint}>Copy</button></div>
+          {#if webhookCopied}<p class="muted" role="status">{webhookCopied}</p>{/if}
+          <p class="muted">In Sonarr or Radarr, add Connect → Webhook with this address, method POST, and the triggers On Import and On Upgrade.</p>
+        </div>
+      </section>
       <div class="save"><button class="primary" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button></div>
     </form>
   {/if}
@@ -141,8 +158,9 @@
   header p, .group-intro p { color: var(--lu-ink-2); line-height: 1.5; margin-top: .4rem; }
   .group { display: grid; grid-template-columns: minmax(11rem, .8fr) minmax(0, 1.6fr); gap: 1.5rem; padding: 1.3rem; background: var(--lu-sheet); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-card); }
   .fields { display: grid; gap: 1rem; min-width: 0; } .fields > label, .columns label { display: grid; gap: .4rem; font-size: .9rem; font-weight: 700; min-width: 0; } label span { color: var(--lu-ink-2); font-size: .82rem; font-weight: 400; line-height: 1.45; }
-  input:not([type=radio]), select { width: 100%; box-sizing: border-box; min-height: var(--lu-target); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-control); background: var(--lu-glass); color: var(--lu-ink); padding: .6rem .75rem; font: inherit; }
+  input:not([type=radio]):not([type=checkbox]), select { width: 100%; box-sizing: border-box; min-height: var(--lu-target); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-control); background: var(--lu-glass); color: var(--lu-ink); padding: .6rem .75rem; font: inherit; }
   input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--lu-accent); outline-offset: 3px; }
+  .fields > label.toggle { display: flex; align-items: flex-start; gap: .7rem; } .toggle input { flex: none; width: 1.25rem; height: 1.25rem; margin: .15rem 0 0; accent-color: var(--lu-accent); } .toggle span { display: grid; gap: .25rem; min-width: 0; } .toggle strong { color: var(--lu-ink); font-size: .9rem; }
   .columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; } .test-row, .copy-row { display: flex; flex-wrap: wrap; align-items: center; gap: .7rem; } .copy-row input { flex: 1 1 14rem; min-width: 0; }
   button { min-height: var(--lu-target); border: 1px solid var(--lu-edge); border-radius: var(--lu-radius-control); padding: .55rem .9rem; font: inherit; font-weight: 700; cursor: pointer; } button:disabled { opacity: .55; cursor: not-allowed; }
   .primary { background: var(--lu-accent); color: var(--lu-accent-ink); } .secondary { background: var(--lu-glass); color: var(--lu-ink); } .save { display: flex; justify-content: flex-end; }

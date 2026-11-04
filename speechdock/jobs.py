@@ -27,6 +27,9 @@ class JobConflict(ValueError):
     pass
 
 
+MAX_CAPTION_QUEUE = 5000
+
+
 class JobManager:
     def __init__(self, store: Store, processor, settings_provider=None):
         self.store = store
@@ -106,11 +109,15 @@ class JobManager:
         rows = dict(self.store.db.execute("SELECT status,COUNT(*) FROM jobs WHERE status IN ('queued','running','cancelling') GROUP BY status"))
         return {"waiting": rows.get("queued", 0), "running": rows.get("running", 0) + rows.get("cancelling", 0)}
 
+    def _waiting_uploads(self) -> int:
+        """Queued Bazarr/UI requests; a long caption batch never counts against their limit."""
+        return self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task!='captions'").fetchone()[0]
+
     async def submit(self, upload, *, source: str, filename: str, task: str, language: str, model: str, encode: bool = True) -> dict:
         async with self._lock:
             if self._closing:
                 raise JobConflict("The job queue is shutting down")
-            if self.queue_status()["waiting"] + self._reservations >= 8:
+            if self._waiting_uploads() + self._reservations >= 8:
                 raise QueueFull("The speech queue is full")
             self._reservations += 1
         job_id = str(uuid.uuid4())
@@ -140,6 +147,34 @@ class JobManager:
         self._wake.set()
         await self._notify()
         return self.store.get_job(job_id)
+
+    async def submit_captions(self, *, source: str, path: str, force: bool, model: str) -> tuple[dict, bool]:
+        """Queue a dub-caption job for one video; returns (job, created).
+
+        A video already queued or running is not queued twice; a queued job that has not started
+        is upgraded to a forced one when a forced request arrives.
+        """
+        async with self._lock:
+            if self._closing:
+                raise JobConflict("The job queue is shutting down")
+            existing = self.store.db.execute(
+                "SELECT id,status,payload FROM jobs WHERE task='captions' AND status IN ('queued','running','cancelling') AND json_extract(payload,'$.path')=?", (path,)).fetchone()
+            if existing:
+                if force and existing["status"] == "queued" and not json.loads(existing["payload"]).get("force"):
+                    with self.store.db:
+                        self.store.db.execute("UPDATE jobs SET payload=? WHERE id=?", (json.dumps({"path": path, "force": True}), existing["id"]))
+                return self.store.get_job(existing["id"]), False
+            waiting = self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task='captions'").fetchone()[0]
+            if waiting >= MAX_CAPTION_QUEUE:
+                raise QueueFull("The caption queue is full")
+            job_id = str(uuid.uuid4())
+            with self.store.db:
+                self.store.db.execute(
+                    "INSERT INTO jobs(id,source,filename,task,language,model,encode,status,created_at,progress,payload) VALUES(?,?,?,?,?,?,1,'queued',?,NULL,?)",
+                    (job_id, source, Path(path).name[:255], "captions", "en", model, utcnow(), json.dumps({"path": path, "force": force})))
+        self._wake.set()
+        await self._notify()
+        return self.store.get_job(job_id), True
 
     async def wait(self, job_id: str) -> dict:
         async with self._changed:
@@ -197,7 +232,7 @@ class JobManager:
         while True:
             self._wake.clear()
             async with self._lock:
-                row = self.store.db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at, rowid LIMIT 1").fetchone()
+                row = self.store.db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY (task='captions'), created_at, rowid LIMIT 1").fetchone()
                 if row:
                     job_id = row[0]
                     with self.store.db:
