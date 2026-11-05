@@ -133,7 +133,7 @@
       <section class="group" aria-labelledby="captions-heading">
         <div class="group-intro"><h2 id="captions-heading">Dub captions</h2><p>Create English captions from a video's English audio when Sonarr or Radarr imports it.</p></div>
         <div class="fields">
-          <label class="toggle"><input type="checkbox" bind:checked={settings.auto_captions} /><span><strong>Create dub captions for new imports</strong>When on, Sonarr/Radarr imports and upgrades sent to the webhook below are queued behind Bazarr requests and captioned from the English audio. Files SpeechDock did not create are never overwritten.</span></label>
+          <label class="toggle"><input type="checkbox" bind:checked={settings.auto_captions} /><span><strong>Create dub captions for new imports</strong>When on, Sonarr/Radarr imports and upgrades sent to the webhook below are queued behind Bazarr requests and captioned from the English audio, but only for dubs of titles whose original language is not English. Files SpeechDock did not create are never overwritten.</span></label>
           <label for="captions-webhook">Webhook address</label>
           <div class="copy-row"><input id="captions-webhook" value={webhook} readonly onclick={(event) => event.currentTarget.select()} /><button type="button" class="secondary" onclick={copyWebhook} disabled={!endpoint}>Copy</button></div>
           {#if webhookCopied}<p class="muted" role="status">{webhookCopied}</p>{/if}

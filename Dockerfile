@@ -37,7 +37,7 @@ RUN ./configure --prefix=/opt/ffmpeg --toolchain=hardened --enable-shared --disa
     && make -j"$(nproc)" install-progs
 
 FROM python:3.12-slim-bookworm AS runtime
-ARG VERSION=0.3.1
+ARG VERSION=0.3.2
 ARG REVISION=unknown
 ARG CREATED=unknown
 LABEL org.opencontainers.image.title="SpeechDock" \

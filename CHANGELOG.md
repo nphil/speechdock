@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2 — 2026-11-04
+
+- Automatic captions only for dubs of non-English originals. An English-original title that also carries a foreign dub (for example English and Portuguese) passed the 0.3.1 filter, and because Bazarr has not fetched its `.en.srt` at import time, SpeechDock wrote a redundant `.en.cc.srt`. The webhook now also reads the title's original language from the payload (`series.originalLanguage` in Sonarr 4, `movie.originalLanguage` in Radarr 6; no Sonarr/Radarr address or API key is needed) and queues only when it is known and not English. English and unknown originals are listed as `skipped` with the reason, without probing the file, and logged. Manual requests are unfiltered.
+
 ## 0.3.1 — 2026-11-04
 
 - Wait for a restarting engine instead of failing jobs. Two bursts of 10-20 queued jobs failed within one second ("Model … is not available" or "Speech engine returned HTTP 502"): once when the host rebooted and SpeechDock came up before its reverse proxy and llama-swap, once when llama-swap's container was recreated by an image update. A request that meets a refused or dropped connection or HTTP 502/503/504 now waits with growing pauses for up to 15 minutes (then fails naming the last reason); the waiting job keeps the head of the queue, so the queue behind it is not failed with it. Requests and caption batches are accepted while the engine is down; a model the engine lists as missing and other HTTP errors still fail at once. This covers every caller: Bazarr `/asr`, uploads and captions.

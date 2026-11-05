@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -16,6 +17,11 @@ MAX_WEBHOOK_BYTES = 2 * 1024 * 1024
 WEBHOOK_EVENTS = frozenset({"download", "upgrade"})  # Sonarr/Radarr "On Import" and "On Upgrade"
 WEBHOOK_PROBE_TIMEOUT = 30
 NOT_A_DUB = "No English audio together with a non-English audio track (not a dub)"
+ENGLISH_ORIGINAL = "The title's original language is English (an English dub is not needed)"
+UNKNOWN_ORIGINAL = "The title's original language is unknown, so it cannot be told whether this is a dub"
+NO_LANGUAGE_NAMES = frozenset({"", "unknown", "any", "original"})  # Sonarr/Radarr placeholders, not a language
+
+log = logging.getLogger("speechdock.captions")
 
 
 class CaptionBody(BaseModel):
@@ -43,6 +49,17 @@ def arr_paths(payload: dict) -> list[str]:
         if isinstance(path, str):
             paths.append(path)
     return paths
+
+
+def original_language(payload: dict) -> str | None:
+    """Original language name of the title (``series.originalLanguage`` / ``movie.originalLanguage``,
+    an ``{"id", "name"}`` object in Sonarr 4 and Radarr 6 payloads); None if absent or a placeholder."""
+    title = payload.get("series") if isinstance(payload.get("series"), dict) else payload.get("movie")
+    language = title.get("originalLanguage") if isinstance(title, dict) else None
+    name = language.get("name") if isinstance(language, dict) else None
+    if not isinstance(name, str) or name.strip().lower() in NO_LANGUAGE_NAMES:
+        return None
+    return name.strip()
 
 
 def attach_caption_routes(app: FastAPI, model_for: Callable[[FastAPI, str, str], Awaitable[dict]]) -> None:
@@ -97,7 +114,8 @@ def attach_caption_routes(app: FastAPI, model_for: Callable[[FastAPI, str, str],
 
         Answers 200 for every event it understands so the *arr app reports no failure; files are
         queued only while the auto-captions setting is on and only if they are dubs (English audio
-        plus a non-English track); the others are listed under ``skipped``.
+        plus a non-English track) of a title whose original language is not English; the others
+        are listed under ``skipped`` with the reason (an English or unknown original language too).
         """
         raw = await request.body()
         if len(raw) > MAX_WEBHOOK_BYTES:
@@ -114,7 +132,18 @@ def attach_caption_routes(app: FastAPI, model_for: Callable[[FastAPI, str, str],
         if not request.app.state.store.get_settings()["auto_captions"]:
             return {"status": "disabled", "event": event, "detail": "Turn on auto-captions in Settings to caption imports."}
 
+        language = original_language(payload)
+        if language is None:
+            title_reason = UNKNOWN_ORIGINAL
+        elif language.lower() == "english":
+            title_reason = ENGLISH_ORIGINAL
+        else:
+            title_reason = None
+
         async def dub_check(path: str) -> str | None:
+            if title_reason:
+                log.warning("Auto captions skipped %s: %s", path, title_reason)
+                return title_reason
             streams = (await media.probe(Path(path), timeout=WEBHOOK_PROBE_TIMEOUT))["streams"]
             return None if media.is_dub_situation(streams) else NOT_A_DUB
 

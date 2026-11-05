@@ -5,7 +5,7 @@ import pytest
 
 from speechdock.app import app
 from speechdock.captions import Ledger, media
-from speechdock.captions.routes import arr_paths
+from speechdock.captions.routes import ENGLISH_ORIGINAL, UNKNOWN_ORIGINAL, arr_paths, original_language
 from speechdock.jobs import JobManager, QueueFull
 from speechdock.store import Store
 
@@ -51,8 +51,12 @@ def client():
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
 
 
-def sonarr(path, event="Download", **extra):
-    return {"eventType": event, "series": {"path": "/tv/Show"}, "episodes": [{"id": 1}], "episodeFile": {"id": 7, "relativePath": path.rsplit("/", 1)[-1], "path": path}, **extra}
+JAPANESE = {"id": 8, "name": "Japanese"}
+
+
+def sonarr(path, event="Download", language=JAPANESE, **extra):
+    series = {"path": "/tv/Show", "originalLanguage": language}
+    return {"eventType": event, "series": series, "episodes": [{"id": 1}], "episodeFile": {"id": 7, "relativePath": path.rsplit("/", 1)[-1], "path": path}, **extra}
 
 
 def test_webhook_paths_come_from_sonarr_and_radarr_payloads():
@@ -161,7 +165,7 @@ async def test_webhook_queues_only_dubs_and_reports_the_rest(service, probed):
     })
     service.store.update_settings({"auto_captions": True})
     async with client() as http:
-        payload = {"eventType": "Download", "series": {"path": "/tv/Show"},
+        payload = {"eventType": "Download", "series": {"path": "/tv/Show", "originalLanguage": JAPANESE},
                    "episodeFiles": [{"relativePath": name} for name in ("Ep 1.mkv", "Ep 2.mkv", "Ep 3.mkv")]}
         reply = await http.post("/api/captions/webhook", json=payload)
     body = reply.json()
@@ -174,6 +178,46 @@ async def test_webhook_queues_only_dubs_and_reports_the_rest(service, probed):
     assert all(timeout == 30 for _, timeout in probed.calls)
     assert service.store.list_jobs()["total"] == 1  # skipped and unreadable files were not queued
     assert app.state.ledger.listing(50, 0, None)["total"] == 0
+
+
+def test_original_language_is_read_from_series_or_movie_and_placeholders_are_unknown():
+    assert original_language({"series": {"originalLanguage": JAPANESE}}) == "Japanese"
+    assert original_language({"movie": {"originalLanguage": {"id": 1, "name": "English"}}}) == "English"
+    for payload in ({}, {"series": {}}, {"series": {"originalLanguage": None}}, {"series": {"originalLanguage": "Japanese"}},
+                    {"series": {"originalLanguage": {"id": 0, "name": "Unknown"}}}, {"movie": {"originalLanguage": {"id": -1, "name": "Any"}}},
+                    {"movie": {"originalLanguage": {"id": -2, "name": "Original"}}}, {"series": None}, {"series": {"originalLanguage": {"id": 8}}}):
+        assert original_language(payload) is None
+
+
+async def test_webhook_queues_a_foreign_original_and_skips_english_and_unknown_originals_without_probing(service, probed):
+    probed.streams["Ep 1.mkv"] = dub_streams("jpn", "eng")
+    probed.streams["Ep 2.mkv"] = dub_streams("eng", "por")
+    service.store.update_settings({"auto_captions": True})
+    async with client() as http:
+        japanese = (await http.post("/api/captions/webhook", json=sonarr("/tv/Show/Ep 1.mkv"))).json()
+        assert [item["path"].rsplit("/", 1)[-1] for item in japanese["queued"]] == ["Ep 1.mkv"] and japanese["skipped"] == []
+        probed.calls.clear()
+        english = (await http.post("/api/captions/webhook", json=sonarr("/tv/Show/Ep 2.mkv", language={"id": 1, "name": "English"}))).json()
+        assert english["queued"] == [] and [item["reason"] for item in english["skipped"]] == [ENGLISH_ORIGINAL]
+        for language in (None, {"id": 0, "name": "Unknown"}):
+            unknown = (await http.post("/api/captions/webhook", json=sonarr("/tv/Show/Ep 2.mkv", language=language))).json()
+            assert unknown["queued"] == [] and [item["reason"] for item in unknown["skipped"]] == [UNKNOWN_ORIGINAL]
+        radarr = {"eventType": "Download", "movie": {"folderPath": "/tv/Show", "originalLanguage": {"id": 1, "name": "English"}}, "movieFile": {"relativePath": "Ep 2.mkv"}}
+        assert (await http.post("/api/captions/webhook", json=radarr)).json()["skipped"][0]["reason"] == ENGLISH_ORIGINAL
+    assert probed.calls == []  # a title-level skip needs no probe
+    assert service.store.list_jobs()["total"] == 1
+    assert app.state.ledger.listing(50, 0, None)["total"] == 0
+
+
+async def test_manual_requests_ignore_the_original_language_filter(service, probed):
+    service.store.update_settings({"auto_captions": True})
+    async with client() as http:
+        skipped = await http.post("/api/captions/webhook", json=sonarr("/tv/Show/Ep 2.mkv", language={"id": 1, "name": "English"}))
+        assert skipped.json()["queued"] == [] and skipped.json()["skipped"]
+        assert (await http.post("/api/captions", json={"path": "/tv/Show/Ep 2.mkv"})).status_code == 202
+        batch = await http.post("/api/captions/batch", json={"paths": ["/tv/Show/Ep 3.mkv"]})
+        assert [item["path"].rsplit("/", 1)[-1] for item in batch.json()["queued"]] == ["Ep 3.mkv"] and "skipped" not in batch.json()
+    assert probed.calls == []
 
 
 async def test_a_skipped_import_can_still_be_captioned_by_hand_and_manual_requests_are_not_filtered(service, probed):
