@@ -77,7 +77,7 @@ class Store:
         if job["task"] == "captions":
             # The report lives in result_json; there is downloadable text only when captions were produced.
             job["result_available"] = job["status"] == "completed" and job["result_text"] is not None
-        if job["task"] == "inspect":
+        if job["task"] in ("inspect", "prune"):
             job["result_available"] = False  # the report is structured; there is nothing to download
         if internal:
             job["encode"] = bool(job["encode"])
@@ -93,11 +93,14 @@ class Store:
             if job["task"] == "captions":
                 report = json.loads(result_json) if result_json else {}
                 job["captions"] = {**(request or {}), **(report if detail else {key: report[key] for key in ("outcome", "cached", "matched") if key in report})}
-            if job["task"] == "inspect":
-                # The list shows the caller's note; the detail carries the whole report.
+            if job["task"] in ("inspect", "prune"):
+                # The list shows the caller's note (and a pruning's outcome); the detail carries the whole report.
                 job["note"] = (request or {}).get("note")
-                if detail:
-                    job["inspection"] = json.loads(result_json) if result_json else None
+                report = json.loads(result_json) if result_json else None
+                if job["task"] == "inspect" and detail:
+                    job["inspection"] = report
+                if job["task"] == "prune":
+                    job["prune"] = report if detail else ({"outcome": report.get("outcome")} if report else None)
         if not detail:
             job.pop("result_text")
         return job

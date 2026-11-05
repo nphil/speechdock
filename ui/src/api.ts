@@ -1,4 +1,4 @@
-export type Task = 'transcribe' | 'translate' | 'detect' | 'captions' | 'inspect';
+export type Task = 'transcribe' | 'translate' | 'detect' | 'captions' | 'inspect' | 'prune';
 export type JobStatus = 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 export type CaptionOutcome = 'written' | 'matched_existing' | 'already_generated' | 'no_english_audio' | 'no_speech';
 export interface CaptionCandidate { source: 'embedded' | 'sidecar'; label: string; stream?: number; title?: string; file?: string; codec?: string; cues: number; agreement: number; precision: number; recall: number }
@@ -20,6 +20,8 @@ export interface InspectedAudio extends InspectedStream {
   detection_error?: string;
 }
 export interface Inspection { path: string; duration: number | null; detect: string | string[]; video: InspectedStream[]; audio: InspectedAudio[]; subtitles: InspectedStream[] }
+export interface PrunedTrack { index: number; codec: string | null; channels: number | null; tag: string; language: string; name: string | null; title: string | null; default: boolean }
+export interface Pruning { path: string; keep: string[]; outcome: 'unchanged' | 'dry_run' | 'pruned'; removed: PrunedTrack[]; kept: PrunedTrack[]; bytes_before: number; bytes_after?: number; seconds?: number; default_set?: number | null; warnings?: string[] }
 export interface Job {
   id: string; source: string; filename: string; task: Task; language: string; model: string; status: JobStatus;
   created_at: string; started_at: string | null; finished_at: string | null; progress: number | null; duration_seconds: number | null;
@@ -28,6 +30,7 @@ export interface Job {
   captions?: CaptionInfo;
   note?: string | null;
   inspection?: Inspection | null;
+  prune?: Pruning | { outcome: Pruning['outcome'] } | null;
 }
 export interface Settings { engine_url: string; transcription_model: string; translation_model: string; detection_model: string; inference_timeout_seconds: number; connect_timeout_seconds: number; max_upload_mb: number; retention_days: number; default_language: string; auto_captions: boolean }
 export interface Download { id: string; status: string; received_bytes: number; total_bytes: number | null; progress: number | null; error: string | null }

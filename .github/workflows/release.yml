@@ -86,6 +86,7 @@ jobs:
           ffmpeg_version=$(docker exec speechdock-smoke ffmpeg -version)
           grep -q '^ffmpeg version 8\.1\.3 ' <<< "$ffmpeg_version" || { echo "Unexpected FFmpeg: $ffmpeg_version"; exit 1; }
           docker exec speechdock-smoke ffprobe -version >/dev/null
+          docker exec speechdock-smoke mkvmerge --version | grep -q '^mkvmerge v' || { echo 'mkvmerge missing'; exit 1; }
           # An xHE-AAC (USAC) stream from the official FFmpeg FATE suite; Debian's FFmpeg 5.1 cannot open it.
           curl --fail --silent --show-error --location https://fate-suite.ffmpeg.org/aac/usac/Fd_1_c1_0x03.mp4 -o "$RUNNER_TEMP/usac.mp4"
           echo "ccf48a4a55648bd8dc7e8655ffc0772ad86cb442b087b8e055ff78604153c7ec  $RUNNER_TEMP/usac.mp4" | sha256sum --check --strict -

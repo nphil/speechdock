@@ -55,7 +55,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     SPDOCK_ALIGNMENT_MODEL_DIR=/opt/speechdock/models/alignment \
     PATH=/app/.venv/bin:$PATH
 COPY --from=ffmpeg /opt/ffmpeg /opt/ffmpeg
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates mkvtoolnix \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /opt/ffmpeg/bin/ffmpeg /opt/ffmpeg/bin/ffprobe /usr/local/bin/ \
     && mkdir -p /app /data /models-owned /llama-config /etc/llama-swap \

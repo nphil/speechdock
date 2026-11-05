@@ -28,8 +28,8 @@ class JobConflict(ValueError):
 
 
 MAX_CAPTION_QUEUE = 5000
-MAX_INSPECT_QUEUE = 200
-PATH_TASKS = ("captions", "inspect")  # jobs whose input is a path in a mount, not a spooled upload
+MAX_INSPECT_QUEUE = 200  # inspections and prunings each
+PATH_TASKS = ("captions", "inspect", "prune")  # jobs whose input is a path in a mount, not a spooled upload
 MAX_RESTARTS = 3  # a job that keeps being cut short by restarts stops being retried
 RESTART_GAVE_UP = f"Processing was interrupted by a restart {MAX_RESTARTS} times and was not retried again"
 
@@ -133,8 +133,8 @@ class JobManager:
         return {"waiting": rows.get("queued", 0), "running": rows.get("running", 0) + rows.get("cancelling", 0)}
 
     def _waiting_uploads(self) -> int:
-        """Queued Bazarr/UI requests; a long caption batch or import-gate inspections never count against their limit."""
-        return self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task NOT IN ('captions','inspect')").fetchone()[0]
+        """Queued Bazarr/UI requests; caption batches and import-gate jobs never count against their limit."""
+        return self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task NOT IN ('captions','inspect','prune')").fetchone()[0]
 
     async def submit(self, upload, *, source: str, filename: str, task: str, language: str, model: str, encode: bool = True) -> dict:
         async with self._lock:
@@ -202,35 +202,46 @@ class JobManager:
     async def submit_inspection(self, *, source: str, path: str, detect: str | list[str], note: str | None, model: str) -> tuple[dict, bool]:
         """Queue an inspection of one video; returns (job, created). The same path with the same
         ``detect`` already queued or running is not queued twice."""
-        request = {"path": path, "detect": detect, **({"note": note} if note else {})}
+        return await self._submit_path_job("inspect", source=source, path=path, model=model, request={"path": path, "detect": detect, **({"note": note} if note else {})}, same="detect")
+
+    async def submit_prune(self, *, source: str, path: str, keep: list[str], dry_run: bool, note: str | None) -> tuple[dict, bool]:
+        """Queue an audio pruning of one video; returns (job, created). A path already queued or running
+        is not queued twice, whatever its keep list."""
+        return await self._submit_path_job("prune", source=source, path=path, model="mkvmerge",
+                                           request={"path": path, "keep": keep, "dry_run": dry_run, **({"note": note} if note else {})}, same=None)
+
+    async def _submit_path_job(self, task: str, *, source: str, path: str, model: str, request: dict, same: str | None) -> tuple[dict, bool]:
         async with self._lock:
             if self._closing:
                 raise JobConflict("The job queue is shutting down")
-            existing = self.store.db.execute(
-                "SELECT id FROM jobs WHERE task='inspect' AND status IN ('queued','running') AND json_extract(payload,'$.path')=? AND json_extract(payload,'$.detect')=json_extract(?,'$.detect')",
-                (path, json.dumps(request))).fetchone()
+            query = "SELECT id FROM jobs WHERE task=? AND status IN ('queued','running') AND json_extract(payload,'$.path')=?"
+            args: tuple = (task, path)
+            if same:
+                query += f" AND json_extract(payload,'$.{same}')=json_extract(?,'$.{same}')"
+                args += (json.dumps(request),)
+            existing = self.store.db.execute(query, args).fetchone()
             if existing:
                 return self.store.get_job(existing["id"]), False
-            waiting = self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task='inspect'").fetchone()[0]
+            waiting = self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task=?", (task,)).fetchone()[0]
             if waiting >= MAX_INSPECT_QUEUE:
-                raise QueueFull("The inspection queue is full")
+                raise QueueFull(f"The {task} queue is full")
             job_id = str(uuid.uuid4())
             with self.store.db:
                 self.store.db.execute(
                     "INSERT INTO jobs(id,source,filename,task,language,model,encode,status,created_at,progress,payload) VALUES(?,?,?,?,?,?,1,'queued',?,NULL,?)",
-                    (job_id, source, Path(path).name[:255], "inspect", "auto", model, utcnow(), json.dumps(request)))
+                    (job_id, source, Path(path).name[:255], task, "auto", model, utcnow(), json.dumps(request)))
         self._wake.set()
         await self._notify()
         return self.store.get_job(job_id), True
 
     async def annotate(self, job_id: str, note: str) -> dict:
-        """Attach a caller's note (its decision, for example) to an inspection job."""
+        """Attach a caller's note (its decision, for example) to an inspection or pruning job."""
         async with self._lock:
             job = self.store.get_job(job_id, internal=True)
             if job is None:
                 raise JobNotFound("Job not found")
-            if job["task"] != "inspect":
-                raise JobConflict("Only inspection jobs take a note")
+            if job["task"] not in ("inspect", "prune"):
+                raise JobConflict("Only inspection and pruning jobs take a note")
             with self.store.db:
                 self.store.db.execute("UPDATE jobs SET payload=? WHERE id=?", (json.dumps({**(job["request"] or {}), "note": note}), job_id))
         await self._notify()

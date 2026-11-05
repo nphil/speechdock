@@ -127,7 +127,7 @@
   {#if job}
     <div class="job-title"><h3>{job.filename}</h3><span class:failed={job.status === 'failed'} class:complete={job.status === 'completed'} class="status">{job.status}</span></div>
     <dl>
-      <div><dt>Task</dt><dd>{job.task === 'captions' ? 'Dub captions' : job.task === 'inspect' ? 'Audio inspection' : job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'}</dd></div>
+      <div><dt>Task</dt><dd>{job.task === 'captions' ? 'Dub captions' : job.task === 'inspect' ? 'Audio inspection' : job.task === 'prune' ? 'Audio pruning' : job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'}</dd></div>
       <div><dt>Language</dt><dd>{job.language}</dd></div>
       <div><dt>Model</dt><dd>{job.model}</dd></div>
       <div><dt>Source</dt><dd>{job.source}</dd></div>
@@ -182,6 +182,28 @@
               <td>{track.tag || 'untagged'}</td>
               <td>{#if track.detected}{track.detected.name} ({track.detected.language}){#if track.detected.probability != null} · {pct(track.detected.probability)}{/if}{:else if track.detection_error}<span class="failed">{track.detection_error}</span>{:else}not checked{/if}</td>
               <td>{#if track.detected}{Math.round(track.detected.sample_start)} s + {track.detected.sample_seconds} s{:else}—{/if}</td></tr>
+          {/each}</tbody>
+        </table></div>
+      </div>
+    {/if}
+    {#if job.task === 'prune' && job.prune && 'removed' in job.prune}
+      {@const p = job.prune}
+      <div class="result">
+        <h3>Audio pruning</h3>
+        <dl class="report">
+          <div class="wide"><dt>Outcome</dt><dd>{p.outcome === 'pruned' ? `${plural(p.removed.length, 'track')} removed · ${size(p.bytes_before)} → ${size(p.bytes_after ?? p.bytes_before)}${p.seconds != null ? ` · ${p.seconds.toFixed(1)} seconds` : ''}` : p.outcome === 'dry_run' ? `dry run: ${plural(p.removed.length, 'track')} would be removed` : 'nothing to remove'}</dd></div>
+          {#if job.note}<div class="wide"><dt>Note</dt><dd>{job.note}</dd></div>{/if}
+          <div class="wide"><dt>Video file</dt><dd class="path">{p.path}</dd></div>
+          <div><dt>Kept languages</dt><dd>{p.keep.join(', ')}{#if p.default_set != null} · default flag moved to track #{p.default_set}{/if}</dd></div>
+          {#if p.warnings?.length}<div class="wide"><dt>Warnings</dt><dd>{p.warnings.join('; ')}</dd></div>{/if}
+        </dl>
+        <h3 class="download-heading">Audio tracks</h3>
+        <div class="table"><table>
+          <thead><tr><th scope="col">Track</th><th scope="col">Tagged</th><th scope="col">Result</th></tr></thead>
+          <tbody>{#each [...p.removed.map(t => ({ t, removed: true })), ...p.kept.map(t => ({ t, removed: false }))].sort((a, b) => a.t.index - b.t.index) as row (row.t.index)}
+            <tr><th scope="row">#{row.t.index} {row.t.codec ?? ''}{#if row.t.channels != null} · {row.t.channels} ch{/if}{#if row.t.title} · {row.t.title}{/if}{#if row.t.default} <span class="badge">default</span>{/if}</th>
+              <td>{row.t.tag || 'untagged'}{#if row.t.name} ({row.t.name}){/if}</td>
+              <td>{row.removed ? (p.outcome === 'pruned' ? 'removed' : 'would be removed') : 'kept'}</td></tr>
           {/each}</tbody>
         </table></div>
       </div>

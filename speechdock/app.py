@@ -28,6 +28,7 @@ from .store import Store
 from .alignment import alignment_lifespan, attach_alignment_routes
 from .captions import Ledger, attach_caption_routes, run_caption_job
 from .inspect import InspectError, clean_source, parse_detect, resolve_inspect_path, run_inspection
+from .prune import PruneError, check_writable_root, parse_keep, run_prune
 
 DATA_DIR = Path(os.environ.get("SPDOCK_DATA_DIR", "/data"))
 FRONTEND_DIR = Path(os.environ.get("SPDOCK_FRONTEND_DIR", "ui/dist"))
@@ -168,6 +169,8 @@ def make_processor(app: FastAPI, store: Store):
         async def waiting(reason: str, waited: float) -> None:
             await progress(None)  # a job cancelled while it waits for the engine stops waiting
 
+        if job["task"] == "prune":
+            return await run_prune(job=job, progress=progress)  # mkvmerge and ffmpeg only, no speech engine
         if job["task"] == "inspect":
             async def engine_for_detection() -> Engine:
                 item = await ready_model(app, job["model"], "detect", make_wait(settings, waiting))
@@ -533,8 +536,37 @@ async def inspect(request: Request, body: InspectBody):
 
 @app.patch("/api/inspect/{job_id}")
 async def annotate_inspection(request: Request, job_id: str, body: NoteBody):
-    """Record what the caller decided from an inspection; shown with the job in Activity."""
+    """Record what the caller decided from an inspection or pruning; shown with the job in Activity."""
     return await request.app.state.jobs.annotate(job_id, re.sub(r"[\x00-\x1f\x7f]", " ", body.note).strip())
+
+
+class PruneBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str
+    keep: list[str] = Field(min_length=1, max_length=20)
+    source: str = "api"
+    note: str | None = Field(default=None, max_length=200)
+    dry_run: bool = Field(default=False, strict=True)
+
+
+@app.post("/api/prune")
+async def prune(request: Request, body: PruneBody):
+    """Remove the audio tracks of a Matroska file whose language is not in ``keep`` (codes or names, in
+    order of preference) and wait for the report. Stream copy only, verified against the original, then
+    renamed over it; untagged tracks stay. ``dry_run`` reports what would go. Allowed only inside the
+    folders ``SPDOCK_PRUNE_ROOTS`` names (the media mounts by default)."""
+    try:
+        source = clean_source(body.source)
+        keep = parse_keep(body.keep)
+        path = Path(await asyncio.to_thread(resolve_inspect_path, body.path))
+        check_writable_root(path)
+    except (InspectError, PruneError, ValueError) as exc:
+        raise HTTPException(422, clean_error(exc)) from exc
+    job, _ = await request.app.state.jobs.submit_prune(source=source, path=str(path), keep=keep, dry_run=body.dry_run, note=body.note)
+    result = await request.app.state.jobs.wait(job["id"])
+    if result["status"] != "completed":
+        raise HTTPException(502, result.get("error") or "Pruning did not complete")
+    return {"job_id": job["id"], **request.app.state.store.get_job(job["id"], internal=True)["result_json"]}
 
 
 @app.post("/detect-language")
