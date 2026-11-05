@@ -28,6 +28,8 @@ class JobConflict(ValueError):
 
 
 MAX_CAPTION_QUEUE = 5000
+MAX_INSPECT_QUEUE = 200
+PATH_TASKS = ("captions", "inspect")  # jobs whose input is a path in a mount, not a spooled upload
 MAX_RESTARTS = 3  # a job that keeps being cut short by restarts stops being retried
 RESTART_GAVE_UP = f"Processing was interrupted by a restart {MAX_RESTARTS} times and was not retried again"
 
@@ -80,7 +82,7 @@ class JobManager:
         queued = self.store.db.execute("SELECT id, task FROM jobs WHERE status='queued'").fetchall()
         live = {row["id"] for row in queued}
         for row in queued:
-            if row["task"] != "captions" and not self._path(row["id"]).is_file():
+            if row["task"] not in PATH_TASKS and not self._path(row["id"]).is_file():
                 with self.store.db:
                     self.store.db.execute("UPDATE jobs SET status='failed', finished_at=?, error=? WHERE id=?", (now, "The uploaded audio was lost during the restart", row["id"]))
                 live.discard(row["id"])
@@ -131,8 +133,8 @@ class JobManager:
         return {"waiting": rows.get("queued", 0), "running": rows.get("running", 0) + rows.get("cancelling", 0)}
 
     def _waiting_uploads(self) -> int:
-        """Queued Bazarr/UI requests; a long caption batch never counts against their limit."""
-        return self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task!='captions'").fetchone()[0]
+        """Queued Bazarr/UI requests; a long caption batch or import-gate inspections never count against their limit."""
+        return self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task NOT IN ('captions','inspect')").fetchone()[0]
 
     async def submit(self, upload, *, source: str, filename: str, task: str, language: str, model: str, encode: bool = True) -> dict:
         async with self._lock:
@@ -196,6 +198,43 @@ class JobManager:
         self._wake.set()
         await self._notify()
         return self.store.get_job(job_id), True
+
+    async def submit_inspection(self, *, source: str, path: str, detect: str | list[str], note: str | None, model: str) -> tuple[dict, bool]:
+        """Queue an inspection of one video; returns (job, created). The same path with the same
+        ``detect`` already queued or running is not queued twice."""
+        request = {"path": path, "detect": detect, **({"note": note} if note else {})}
+        async with self._lock:
+            if self._closing:
+                raise JobConflict("The job queue is shutting down")
+            existing = self.store.db.execute(
+                "SELECT id FROM jobs WHERE task='inspect' AND status IN ('queued','running') AND json_extract(payload,'$.path')=? AND json_extract(payload,'$.detect')=json_extract(?,'$.detect')",
+                (path, json.dumps(request))).fetchone()
+            if existing:
+                return self.store.get_job(existing["id"]), False
+            waiting = self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task='inspect'").fetchone()[0]
+            if waiting >= MAX_INSPECT_QUEUE:
+                raise QueueFull("The inspection queue is full")
+            job_id = str(uuid.uuid4())
+            with self.store.db:
+                self.store.db.execute(
+                    "INSERT INTO jobs(id,source,filename,task,language,model,encode,status,created_at,progress,payload) VALUES(?,?,?,?,?,?,1,'queued',?,NULL,?)",
+                    (job_id, source, Path(path).name[:255], "inspect", "auto", model, utcnow(), json.dumps(request)))
+        self._wake.set()
+        await self._notify()
+        return self.store.get_job(job_id), True
+
+    async def annotate(self, job_id: str, note: str) -> dict:
+        """Attach a caller's note (its decision, for example) to an inspection job."""
+        async with self._lock:
+            job = self.store.get_job(job_id, internal=True)
+            if job is None:
+                raise JobNotFound("Job not found")
+            if job["task"] != "inspect":
+                raise JobConflict("Only inspection jobs take a note")
+            with self.store.db:
+                self.store.db.execute("UPDATE jobs SET payload=? WHERE id=?", (json.dumps({**(job["request"] or {}), "note": note}), job_id))
+        await self._notify()
+        return self.store.get_job(job_id)
 
     async def wait(self, job_id: str) -> dict:
         async with self._changed:

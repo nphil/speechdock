@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0 — 2026-11-05
+
+- Add audio inspection for import gates. `POST /api/inspect` takes a video from the download mount (`/downloads`, read-only; `SPDOCK_INSPECT_ROOTS` to change it) or the media mounts and waits for its report: every stream with its container tags (`jpn` is reported as `ja`), and for the audio tracks `detect` names (untagged ones by default, `all`, `none`, or a list of language codes to verify as well) the language Whisper hears on the longest stretch of speech in 120 seconds around the middle of the track (then at 30 % and 70 %), with whisper.cpp's probability and where the sample was taken. Commentary and audio-description tracks are never detected; a track the engine could not judge keeps its tags and reports `detection_error`; only an unreadable file fails (502 with ffprobe's message). SpeechDock decides nothing: a gate script applies its own rules and fails the download so Sonarr/Radarr blocklist and search again. Inspections show in Activity as "Audio inspection" with the caller's `source`; `PATCH /api/inspect/{job_id}` records the caller's decision beside it. They share the serial queue with Bazarr requests, ahead of caption batches, without using up the Bazarr queue limit (200 may wait); the same path is not inspected twice at once.
+- Language detection replies carry whisper.cpp's `probability` when the engine reports one.
+- The Unraid template gains an optional read-only download-folder mount.
+
 ## 0.3.2 — 2026-11-04
 
 - Automatic captions only for dubs of non-English originals. An English-original title that also carries a foreign dub (for example English and Portuguese) passed the 0.3.1 filter, and because Bazarr has not fetched its `.en.srt` at import time, SpeechDock wrote a redundant `.en.cc.srt`. The webhook now also reads the title's original language from the payload (`series.originalLanguage` in Sonarr 4, `movie.originalLanguage` in Radarr 6; no Sonarr/Radarr address or API key is needed) and queues only when it is known and not English. English and unknown originals are listed as `skipped` with the reason, without probing the file, and logged. Manual requests are unfiltered.

@@ -69,7 +69,7 @@
       {:else}
         <div class="rows">{#each items as job (job.id)}
           <button type="button" class="row" class:selected={selected === job.id} aria-pressed={selected === job.id} onclick={() => selected = job.id}>
-            <span class="row-main"><strong>{job.filename}</strong><span>{job.task === 'captions' ? 'Dub captions' : job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'} · {date(job.created_at)}{#if job.captions?.outcome} · {outcomes[job.captions.outcome]}{/if}</span></span>
+            <span class="row-main"><strong>{job.filename}</strong><span>{job.task === 'captions' ? 'Dub captions' : job.task === 'inspect' ? 'Audio inspection' : job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'} · {date(job.created_at)}{#if job.captions?.outcome} · {outcomes[job.captions.outcome]}{/if}{#if job.task === 'inspect' && job.note} · {job.note}{/if}</span></span>
             <span class="status" class:complete={job.status === 'completed'} class:failed={job.status === 'failed'}>{job.status}{#if job.status === 'running' && job.progress != null} · {Math.round(job.progress * 100)}%{/if}</span>
           </button>
         {/each}</div>

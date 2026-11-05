@@ -127,7 +127,7 @@
   {#if job}
     <div class="job-title"><h3>{job.filename}</h3><span class:failed={job.status === 'failed'} class:complete={job.status === 'completed'} class="status">{job.status}</span></div>
     <dl>
-      <div><dt>Task</dt><dd>{job.task === 'captions' ? 'Dub captions' : job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'}</dd></div>
+      <div><dt>Task</dt><dd>{job.task === 'captions' ? 'Dub captions' : job.task === 'inspect' ? 'Audio inspection' : job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'}</dd></div>
       <div><dt>Language</dt><dd>{job.language}</dd></div>
       <div><dt>Model</dt><dd>{job.model}</dd></div>
       <div><dt>Source</dt><dd>{job.source}</dd></div>
@@ -161,6 +161,29 @@
             {/each}</tbody>
           </table></div>
         {/if}
+      </div>
+    {/if}
+    {#if job.task === 'inspect' && job.inspection}
+      {@const r = job.inspection}
+      <div class="result">
+        <h3>Audio inspection</h3>
+        <dl class="report">
+          {#if job.note}<div class="wide"><dt>Decision</dt><dd>{job.note}</dd></div>{/if}
+          <div class="wide"><dt>Video file</dt><dd class="path">{r.path}</dd></div>
+          {#if r.video.length}<div><dt>Video</dt><dd>{r.video.map(v => `${v.codec ?? '?'}${v.width && v.height ? ` ${v.width}×${v.height}` : ''}`).join(', ')}</dd></div>{/if}
+          <div><dt>Subtitles</dt><dd>{r.subtitles.length ? r.subtitles.map(s => s.language || s.tag || 'untagged').join(', ') : 'none'}</dd></div>
+          <div><dt>Detected</dt><dd>{Array.isArray(r.detect) ? `untagged and ${r.detect.join(', ')} tracks` : r.detect === 'all' ? 'every track' : r.detect === 'none' ? 'nothing (tags only)' : 'untagged tracks'}</dd></div>
+        </dl>
+        <h3 class="download-heading">Audio tracks</h3>
+        <div class="table"><table>
+          <thead><tr><th scope="col">Track</th><th scope="col">Tagged</th><th scope="col">Heard</th><th scope="col">Sample</th></tr></thead>
+          <tbody>{#each r.audio as track (track.index)}
+            <tr><th scope="row">#{track.index} {track.codec ?? ''}{#if track.channels != null} · {track.channels} ch{/if}{#if track.title} · {track.title}{/if}{#if track.commentary} <span class="badge">commentary</span>{/if}{#if track.default} <span class="badge">default</span>{/if}</th>
+              <td>{track.tag || 'untagged'}</td>
+              <td>{#if track.detected}{track.detected.name} ({track.detected.language}){#if track.detected.probability != null} · {pct(track.detected.probability)}{/if}{:else if track.detection_error}<span class="failed">{track.detection_error}</span>{:else}not checked{/if}</td>
+              <td>{#if track.detected}{Math.round(track.detected.sample_start)} s + {track.detected.sample_seconds} s{:else}—{/if}</td></tr>
+          {/each}</tbody>
+        </table></div>
       </div>
     {/if}
     {#if job.result_available && job.task === 'detect' && job.detection}

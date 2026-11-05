@@ -27,6 +27,7 @@ from .recovery import Fallback, transcribe_window
 from .store import Store
 from .alignment import alignment_lifespan, attach_alignment_routes
 from .captions import Ledger, attach_caption_routes, run_caption_job
+from .inspect import InspectError, clean_source, parse_detect, resolve_inspect_path, run_inspection
 
 DATA_DIR = Path(os.environ.get("SPDOCK_DATA_DIR", "/data"))
 FRONTEND_DIR = Path(os.environ.get("SPDOCK_FRONTEND_DIR", "ui/dist"))
@@ -167,6 +168,12 @@ def make_processor(app: FastAPI, store: Store):
         async def waiting(reason: str, waited: float) -> None:
             await progress(None)  # a job cancelled while it waits for the engine stops waiting
 
+        if job["task"] == "inspect":
+            async def engine_for_detection() -> Engine:
+                item = await ready_model(app, job["model"], "detect", make_wait(settings, waiting))
+                return Engine(settings, runtime=item["runtime"], architecture=item["architecture"], on_wait=waiting)
+            return await run_inspection(job=job, progress=progress, engine_for_detection=engine_for_detection, model=job["model"],
+                                        vad_model=Path(os.environ.get("SPDOCK_VAD_MODEL", "/opt/speechdock/models/silero-vad-v5.1.onnx")))
         item = await ready_model(app, job["model"], "transcribe" if job["task"] == "captions" else job["task"], make_wait(settings, waiting))
         if job["task"] == "captions":
             return await run_caption_job(
@@ -487,6 +494,47 @@ async def sync_job(request: Request, audio_file: UploadFile, task: str, language
     if result["status"] != "completed":
         raise HTTPException(502, result.get("error") or "Speech processing did not complete")
     return request.app.state.store.get_job(job["id"], internal=True)
+
+
+class InspectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str
+    detect: str | list[str] = "untagged"
+    source: str = "api"
+    note: str | None = Field(default=None, max_length=200)
+
+
+class NoteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    note: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/inspect")
+async def inspect(request: Request, body: InspectBody):
+    """Inspect one video from the inspectable mounts and wait for the report: every stream with its
+    tags, and for the audio tracks ``detect`` names (``untagged`` by default, ``all``, ``none`` or a
+    list of language codes to verify) the language Whisper hears on a sample from the middle of the
+    track. The job shows in Activity; the same path is not inspected twice at once."""
+    settings = request.app.state.store.get_settings()
+    try:
+        source = clean_source(body.source)
+        detect = parse_detect(body.detect)
+        path = str(await asyncio.to_thread(resolve_inspect_path, body.path))
+        if detect != "none":
+            await model_for(request.app, settings["detection_model"], "detect")
+    except (InspectError, ValueError) as exc:
+        raise HTTPException(422, clean_error(exc)) from exc
+    job, _ = await request.app.state.jobs.submit_inspection(source=source, path=path, detect=detect, note=body.note, model=settings["detection_model"])
+    result = await request.app.state.jobs.wait(job["id"])
+    if result["status"] != "completed":
+        raise HTTPException(502, result.get("error") or "Inspection did not complete")
+    return {"job_id": job["id"], **request.app.state.store.get_job(job["id"], internal=True)["result_json"]}
+
+
+@app.patch("/api/inspect/{job_id}")
+async def annotate_inspection(request: Request, job_id: str, body: NoteBody):
+    """Record what the caller decided from an inspection; shown with the job in Activity."""
+    return await request.app.state.jobs.annotate(job_id, re.sub(r"[\x00-\x1f\x7f]", " ", body.note).strip())
 
 
 @app.post("/detect-language")

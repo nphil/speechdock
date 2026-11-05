@@ -163,6 +163,33 @@ Paths must be inside the media mounts (`/plex-media/tv`, `/plex-media/movies`); 
 
 **Original language.** The webhook also requires the title's original language to be known and not English: it reads `series.originalLanguage` (Sonarr 4) or `movie.originalLanguage` (Radarr 6) from the payload, an `{"id", "name"}` object, and needs no Sonarr/Radarr address or API key. An English original that merely carries a foreign dub is listed under `skipped` with "The title's original language is English", and a missing, `Unknown`, `Any` or `Original` language with "The title's original language is unknown"; such skips are not probed, not recorded, and logged as a warning. Manual `POST /api/captions` and `/batch` requests ignore this filter.
 
+## Audio inspection
+
+Sonarr and Radarr judge a release by its name and import whatever the file contains, so a "dual audio" download can arrive with the wrong languages, untagged tracks, or an `eng` tag on a Portuguese track. `POST /api/inspect` answers what is really in a file: every stream with its container tags, and for the audio tracks you ask about, the language Whisper hears on a sample of the track. It decides nothing itself. An import gate (an NZBGet post-processing script, a qBittorrent "run on finished" hook, anything that runs before the *arr sees the download as complete) applies its own rules to the answer and fails the download when they are broken, so the *arr blocklists it and searches again.
+
+```sh
+# Wait for the report of one video from the download folders
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"path":"/downloads/Show.S01E01.mkv","detect":["ja","en"],"source":"nzbget"}' \
+  https://speechdock.nateshome.net/api/inspect
+# Record what you decided; it shows with the job in Activity
+curl -X PATCH -H 'Content-Type: application/json' -d '{"note":"Rejected: no Japanese audio (en, pt)"}' \
+  https://speechdock.nateshome.net/api/inspect/<job_id>
+```
+
+`detect` chooses which audio tracks are listened to: `untagged` (the default: tracks with no language tag or `und`), `all`, `none` (tags only, no engine needed), or a list of language codes, which verifies the tracks tagged with those languages as well as untagged ones (`["ja","en"]` catches a track tagged English that is really Portuguese). Commentary and audio-description tracks are never detected. Each detected track reports the language, its name, the probability whisper.cpp gives it, and where the sample was taken: 120 seconds around the middle of the track are read, the longest stretch of speech in them (up to 28 seconds, found by the Silero detector) is sent to the detection model; if there is no speech there, 30 % and 70 % of the track are tried, then the track reports `detection_error` instead. At most 8 tracks per file are detected. The reply is the report of a job that appears in Activity as "Audio inspection" with the caller's `source`; a track the engine could not judge keeps its tags and carries `detection_error`, so a caller can still decide on what it has or let the file through. The same path is not inspected twice at once. An unreadable file answers 502 with ffprobe's message; a path outside the inspectable folders, a non-video file or a bad `detect` answers 422.
+
+```json
+{"job_id":"…","path":"/downloads/Show.S01E01.mkv","duration":1420.5,"detect":["en","ja"],
+ "video":[{"index":0,"codec":"hevc","width":1920,"height":1080,…}],
+ "audio":[{"index":1,"codec":"aac","channels":2,"tag":"jpn","language":"ja","title":null,"default":true,"forced":false,"commentary":false,
+           "detected":{"language":"ja","name":"japanese","probability":0.98,"sample_start":704.2,"sample_seconds":22.4}},
+          {"index":2,"codec":"eac3","channels":6,"tag":"eng","language":"en",…,"detected":{"language":"pt","name":"portuguese","probability":0.91,…}}],
+ "subtitles":[{"index":3,"codec":"ass","tag":"eng","language":"en","forced":false,…}]}
+```
+
+`language` is the container tag as Whisper's two-letter code when known (`jpn` → `ja`), empty for untagged tracks, otherwise the tag itself. Inspectable folders are the download mount (`/downloads` by default, mount it read-only) and the media mounts; `SPDOCK_INSPECT_ROOTS` replaces the download default with a JSON object of the same shape as `SPDOCK_CAPTION_ROOTS`. Inspections run in the same serial queue as Bazarr requests (ahead of caption batches) and never use up the Bazarr queue limit; up to 200 can wait. The gate script itself is not part of SpeechDock: keep the rules where the download clients run, and let the import proceed whenever SpeechDock cannot answer.
+
 ## Processing and storage
 
 Speech work runs one job at a time with a bounded waiting queue. Uploads are spooled to disk and normalized in five-minute PCM blocks. Transcription and translation send every bounded non-digitally-silent window, including quiet dialogue and background audio; they do not discard samples on a speech-detector prediction. This can send substantially more audio to the model than VAD-only processing. The checksum-pinned CPU Silero detector is retained for language detection. Original movie offsets, including long openings, are preserved. Digital silence produces no subtitle cues; language detection reports when no speech is available. Recognition can still miss, mishear or hallucinate content. Cancellation takes effect at safe processing boundaries, not necessarily during an engine request.
@@ -188,9 +215,9 @@ curl -F file=@recording.flac -F task=transcribe -F language=auto \
   https://speechdock.nateshome.net/api/jobs
 ```
 
-The response is a queued job. Read `GET /api/jobs/{id}` for status and download `GET /api/jobs/{id}/result?format=srt` after completion. Detection-job detail includes `detection: {language_code, detected_language}`. Failures return real error statuses/messages, not empty fake subtitle files.
+The response is a queued job. Read `GET /api/jobs/{id}` for status and download `GET /api/jobs/{id}/result?format=srt` after completion. Detection-job detail includes `detection: {language_code, detected_language}`; `POST /api/inspect` (see Audio inspection) returns a per-stream report of a video file. Failures return real error statuses/messages, not empty fake subtitle files.
 
-Settings are persisted after the first start. `SPDOCK_ENGINE_URL` supplies the initial engine URL; change saved settings in the UI afterward. Advanced deployment variables include `SPDOCK_DATA_DIR`, `SPDOCK_MODELS_DIR`, `SPDOCK_LLAMA_CONFIG`, `SPDOCK_ENGINE_MODELS_DIR`, `SPDOCK_LLAMA_VALIDATOR`, `SPDOCK_VAD_MODEL`, `SPDOCK_FRONTEND_DIR` and `SPDOCK_CAPTION_ROOTS`. The production image bundles the read-only VAD model at `/opt/speechdock/models/silero-vad-v5.1.onnx`; it never downloads models on a transcription request.
+Settings are persisted after the first start. `SPDOCK_ENGINE_URL` supplies the initial engine URL; change saved settings in the UI afterward. Advanced deployment variables include `SPDOCK_DATA_DIR`, `SPDOCK_MODELS_DIR`, `SPDOCK_LLAMA_CONFIG`, `SPDOCK_ENGINE_MODELS_DIR`, `SPDOCK_LLAMA_VALIDATOR`, `SPDOCK_VAD_MODEL`, `SPDOCK_FRONTEND_DIR`, `SPDOCK_CAPTION_ROOTS` and `SPDOCK_INSPECT_ROOTS`. The production image bundles the read-only VAD model at `/opt/speechdock/models/silero-vad-v5.1.onnx`; it never downloads models on a transcription request.
 
 ## Development
 

@@ -1,4 +1,4 @@
-export type Task = 'transcribe' | 'translate' | 'detect' | 'captions';
+export type Task = 'transcribe' | 'translate' | 'detect' | 'captions' | 'inspect';
 export type JobStatus = 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 export type CaptionOutcome = 'written' | 'matched_existing' | 'already_generated' | 'no_english_audio' | 'no_speech';
 export interface CaptionCandidate { source: 'embedded' | 'sidecar'; label: string; stream?: number; title?: string; file?: string; codec?: string; cues: number; agreement: number; precision: number; recall: number }
@@ -13,12 +13,21 @@ export interface CaptionInfo {
   note?: string | null;
   timings?: { probe?: number; extract?: number; transcribe?: number; analyse?: number; total?: number };
 }
+export interface InspectedStream { index: number; codec: string | null; tag: string; language: string; title: string | null; default: boolean; forced: boolean; width?: number | null; height?: number | null }
+export interface InspectedAudio extends InspectedStream {
+  channels: number | null; commentary: boolean;
+  detected: { language: string; name: string; probability?: number; sample_start: number; sample_seconds: number } | null;
+  detection_error?: string;
+}
+export interface Inspection { path: string; duration: number | null; detect: string | string[]; video: InspectedStream[]; audio: InspectedAudio[]; subtitles: InspectedStream[] }
 export interface Job {
-  id: string; source: 'bazarr' | 'upload' | 'api' | 'captions' | 'webhook'; filename: string; task: Task; language: string; model: string; status: JobStatus;
+  id: string; source: string; filename: string; task: Task; language: string; model: string; status: JobStatus;
   created_at: string; started_at: string | null; finished_at: string | null; progress: number | null; duration_seconds: number | null;
   error: string | null; result_available: boolean; result_text?: string | null;
   detection?: { language_code: string; detected_language: string } | null;
   captions?: CaptionInfo;
+  note?: string | null;
+  inspection?: Inspection | null;
 }
 export interface Settings { engine_url: string; transcription_model: string; translation_model: string; detection_model: string; inference_timeout_seconds: number; connect_timeout_seconds: number; max_upload_mb: number; retention_days: number; default_language: string; auto_captions: boolean }
 export interface Download { id: string; status: string; received_bytes: number; total_bytes: number | null; progress: number | null; error: string | null }

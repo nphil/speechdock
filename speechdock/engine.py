@@ -515,6 +515,11 @@ class Engine:
             code = normalize_language(value)
             if code == "auto":
                 raise ValueError("No detected language")
+            probability = payload.get("detected_language_probability")
+            probability = round(float(probability), 4) if isinstance(probability, (int, float)) and 0 <= probability <= 1 else None
         except (ValueError, TypeError) as exc:
             raise EngineError("Speech engine did not return a recognized detected language") from exc
-        return {"language_code": code, "detected_language": LANGUAGES[code]}
+        result = {"language_code": code, "detected_language": LANGUAGES[code]}
+        if probability is not None:
+            result["probability"] = probability  # whisper.cpp reports it; other servers may not
+        return result

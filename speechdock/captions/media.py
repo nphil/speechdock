@@ -93,7 +93,7 @@ async def probe(path: Path, timeout: float = 180) -> dict:
     # explains itself with a warning-level line.
     code, out, err = await _run([
         "ffprobe", "-v", "warning", "-show_entries",
-        "stream=index,codec_type,codec_name,channels:stream_tags=language,title"
+        "stream=index,codec_type,codec_name,channels,width,height:stream_tags=language,title"
         ":stream_disposition=default,forced,comment,hearing_impaired,visual_impaired,descriptions,dub,original"
         ":format=duration", "-of", "json", str(path)], timeout=timeout)
     if code:
