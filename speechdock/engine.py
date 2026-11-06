@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import math
+import re
 import textwrap
 import time
 import unicodedata
@@ -38,6 +39,10 @@ RETRY_FIRST_SECONDS = 1.0
 RETRY_CAP_SECONDS = 15.0
 # 502/503/504 is what the reverse proxy or llama-swap answers while the engine restarts, reloads or loads a model.
 TRANSIENT_STATUS = frozenset({502, 503, 504})
+# llama-swap answers HTTP 500 when a model's launch command exits before it is ready, which an on-demand
+# model's GPU-memory guard does while a chat model fills the card. It clears when the chat model idles out,
+# so that one 500 is waited for like the statuses above; any other 500 is a real failure.
+MODEL_NOT_STARTED = re.compile(r"upstream command (exited|failed)|failed to start", re.IGNORECASE)
 TRANSIENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, httpx.WriteError,
                     httpx.RemoteProtocolError, httpx.PoolTimeout)
 
@@ -417,8 +422,8 @@ class Engine:
 
     async def _request(self, wav: bytes, model: str, fields: dict) -> httpx.Response:
         """POST one window. A restarting or reloading engine (connection refused or dropped,
-        HTTP 502/503/504) is waited for with growing pauses up to the wait limit, then
-        ``EngineUnavailable``; any other failure is an immediate ``EngineError``."""
+        HTTP 502/503/504, or a 500 saying the model's launch command exited) is waited for with growing
+        pauses up to the wait limit, then ``EngineUnavailable``; any other failure is an immediate ``EngineError``."""
         path = ("/upstream/" + quote(model, safe="") + "/inference"
                 if (self.runtime, self.architecture) == ("crispasr", "parakeet")
                 else "/v1/audio/transcriptions")
@@ -432,9 +437,12 @@ class Engine:
                 return response
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
-                if status not in TRANSIENT_STATUS:
+                if status in TRANSIENT_STATUS:
+                    reason = f"HTTP {status}"
+                elif status == 500 and MODEL_NOT_STARTED.search(exc.response.text[:2000]):
+                    reason = "HTTP 500, the speech model could not start (GPU memory in use?)"
+                else:
                     raise EngineError(f"Speech engine returned HTTP {status}") from exc
-                reason = f"HTTP {status}"
             except TRANSIENT_ERRORS as exc:
                 reason = type(exc).__name__
             except httpx.HTTPError as exc:

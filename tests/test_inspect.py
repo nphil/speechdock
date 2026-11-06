@@ -169,6 +169,7 @@ async def test_detection_failures_are_reported_per_track_and_an_absent_engine_is
     engine = FakeEngine(error=EngineError("Speech engine returned HTTP 500"))
     report, _ = await inspection(monkeypatch, "all", engine)
     assert report["audio"][0]["detected"] is None and report["audio"][0]["detection_error"] == "Speech engine returned HTTP 500"
+    assert "detection_unavailable" not in report["audio"][0]  # a permanent failure is not worth another try
     assert report["audio"][1]["detected"]["language"] == "pt"  # the next track was still tried
 
     async def unavailable(path, track, duration, eng, model, detector):
@@ -176,6 +177,7 @@ async def test_detection_failures_are_reported_per_track_and_an_absent_engine_is
 
     report, _ = await inspection(monkeypatch, "all", FakeEngine(), detect_fn=unavailable)
     assert [t.get("detection_error") for t in report["audio"]] == ["The speech engine did not come back"] * 2 + [None]
+    assert [t.get("detection_unavailable") for t in report["audio"]] == [True, True, None]  # the caller may try again later
 
 
 async def test_an_unreadable_file_fails_the_job(monkeypatch):

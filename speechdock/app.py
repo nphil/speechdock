@@ -143,6 +143,7 @@ async def ready_model(app: FastAPI, model: str, task: str, wait: EngineWait) -> 
 
 
 FALLBACK_WAIT_SECONDS = 90  # a fallback model that will not start is dropped quickly, unlike the engine itself
+INSPECT_WAIT_SECONDS = 600  # an import gate's request is held open by its caller; its timeout is 25 minutes
 
 
 async def fallback_for(app: FastAPI, settings: dict, item: dict, task: str, waiting) -> Fallback | None:
@@ -172,9 +173,11 @@ def make_processor(app: FastAPI, store: Store):
         if job["task"] == "prune":
             return await run_prune(job=job, progress=progress)  # mkvmerge and ffmpeg only, no speech engine
         if job["task"] == "inspect":
+            gate_settings = {**settings, "engine_wait_seconds": min(float(settings.get("engine_wait_seconds", ENGINE_WAIT_SECONDS)), INSPECT_WAIT_SECONDS)}
+
             async def engine_for_detection() -> Engine:
-                item = await ready_model(app, job["model"], "detect", make_wait(settings, waiting))
-                return Engine(settings, runtime=item["runtime"], architecture=item["architecture"], on_wait=waiting)
+                item = await ready_model(app, job["model"], "detect", make_wait(gate_settings, waiting))
+                return Engine(gate_settings, runtime=item["runtime"], architecture=item["architecture"], on_wait=waiting)
             return await run_inspection(job=job, progress=progress, engine_for_detection=engine_for_detection, model=job["model"],
                                         vad_model=Path(os.environ.get("SPDOCK_VAD_MODEL", "/opt/speechdock/models/silero-vad-v5.1.onnx")))
         item = await ready_model(app, job["model"], "transcribe" if job["task"] == "captions" else job["task"], make_wait(settings, waiting))

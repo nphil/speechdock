@@ -188,11 +188,13 @@ async def run_inspection(*, job: dict, progress: Callable[..., Awaitable[None]],
         for number, track in enumerate(targets):
             if unavailable:
                 track["detection_error"] = unavailable
+                track["detection_unavailable"] = True
                 continue
             try:
                 track["detected"] = await detect_track(path, track, info["duration"], engine, model, detector)
             except EngineUnavailable as exc:
                 unavailable = track["detection_error"] = str(exc)
+                track["detection_unavailable"] = True
             except (MediaError, EngineError) as exc:
                 track["detection_error"] = str(exc)
             await progress((number + 1) / len(targets), info["duration"])

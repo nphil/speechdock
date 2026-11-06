@@ -45,7 +45,8 @@ def outages(*failures, then=None):
             failure = failures[len(calls) - 1]
             if isinstance(failure, Exception):
                 raise failure
-            return httpx.Response(failure, text="upstream down")
+            status, text = failure if isinstance(failure, tuple) else (failure, "upstream down")
+            return httpx.Response(status, text=text)
         return httpx.Response(200, json=then or NATIVE)
     handler.calls = calls
     return handler
@@ -73,6 +74,41 @@ async def test_the_wait_is_bounded_and_says_why(monkeypatch):
     with pytest.raises(EngineUnavailable, match=r"not available for 0.2 s \(HTTP 502\)"):
         await parakeet(engine_wait_seconds=0.2).transcribe(wav(), "parakeet", "en", "transcribe")
     assert 2 <= len(handler.calls) < 50  # it did wait and retry, and it did stop
+
+
+LLAMA_SWAP_500 = (500, '{"error":{"code":500,"message":"upstream command exited prematurely but successfully","type":"server_error"}}')
+
+
+async def test_a_500_from_a_model_that_could_not_start_is_waited_for(monkeypatch):
+    handler = outages(LLAMA_SWAP_500, (500, "upstream command exited: Insufficient GPU memory"), 502)
+    serve(monkeypatch, handler)
+    waits = []
+
+    async def on_wait(reason, waited):
+        waits.append(reason)
+
+    engine = parakeet()
+    engine.on_wait = on_wait
+    cues = parse_srt(await engine.transcribe(wav(), "parakeet", "en", "transcribe"))
+    assert [cue.text for cue in cues] == ["Hello there."] and len(handler.calls) == 4
+    assert waits[0] == waits[1] == "HTTP 500, the speech model could not start (GPU memory in use?)" and waits[2] == "HTTP 502"
+
+
+async def test_the_wait_for_a_model_that_never_starts_is_bounded_and_says_why(monkeypatch):
+    handler = outages(*[LLAMA_SWAP_500] * 500)
+    serve(monkeypatch, handler)
+    with pytest.raises(EngineUnavailable, match=r"not available for 0.2 s \(HTTP 500, the speech model could not start"):
+        await parakeet(engine_wait_seconds=0.2).transcribe(wav(), "parakeet", "en", "transcribe")
+    assert 2 <= len(handler.calls) < 50
+
+
+@pytest.mark.parametrize("body", ["", "internal error", '{"error":"model not found"}', "out of memory"])
+async def test_any_other_500_stays_permanent(monkeypatch, body):
+    handler = outages(*[(500, body)] * 5)
+    serve(monkeypatch, handler)
+    with pytest.raises(EngineError, match="returned HTTP 500") as caught:
+        await parakeet().transcribe(wav(), "parakeet", "en", "transcribe")
+    assert not isinstance(caught.value, EngineUnavailable) and len(handler.calls) == 1
 
 
 def test_an_unavailable_engine_is_still_an_engine_error():
