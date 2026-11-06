@@ -143,7 +143,7 @@ async def ready_model(app: FastAPI, model: str, task: str, wait: EngineWait) -> 
 
 
 FALLBACK_WAIT_SECONDS = 90  # a fallback model that will not start is dropped quickly, unlike the engine itself
-INSPECT_WAIT_SECONDS = 600  # an import gate's request is held open by its caller; its timeout is 25 minutes
+INSPECT_WAIT_SECONDS = 720  # longer than the 600 s idle timeout of llama-swap's big chat models; callers allow 30 minutes
 
 
 async def fallback_for(app: FastAPI, settings: dict, item: dict, task: str, waiting) -> Fallback | None:

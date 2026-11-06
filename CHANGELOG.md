@@ -2,7 +2,7 @@
 
 ## 0.5.1 — 2026-11-06
 
-- Wait for an on-demand speech model that cannot start yet. The first overnight run of the import gate accepted 12 downloads unheard ("Speech engine returned HTTP 500"): language detection uses Whisper Large-v3, which llama-swap starts only when at least 8 GiB of GPU memory is free, and while a chat model was loaded its launch command exited and llama-swap answered HTTP 500. That 500 (recognised by the launch-command text in its body) is now waited for with growing pauses like 502/503/504; any other 500 still fails at once. `POST /api/inspect` waits at most 10 minutes for it (other jobs keep 15), and a track not listened to because the engine stayed unavailable reports `detection_unavailable: true` next to `detection_error`, so the caller can retry later instead of trusting tags.
+- Wait for an on-demand speech model that cannot start yet. The first overnight run of the import gate accepted 12 downloads unheard ("Speech engine returned HTTP 500"): language detection uses Whisper Large-v3, which llama-swap starts only when at least 8 GiB of GPU memory is free, and while a chat model was loaded its launch command exited and llama-swap answered HTTP 500. That 500 (recognised by the launch-command text in its body) is now waited for with growing pauses like 502/503/504; any other 500 still fails at once. `POST /api/inspect` waits at most 12 minutes for it (longer than the 10-minute idle timeout of the big chat models; other jobs keep 15), and a track not listened to because the engine stayed unavailable reports `detection_unavailable: true` next to `detection_error`, so the caller can retry later instead of trusting tags.
 
 ## 0.5.0 — 2026-11-05
 
