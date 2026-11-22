@@ -84,8 +84,12 @@ class Library:
                 page = await self.get(self.sources["bazarr"], f"/api/{kind}/history", {"start": start, "length": 200})
                 items = page.get("data") or []
                 for item in items:
-                    stamp = _parse_time(item.get("parsed_timestamp") or item.get("timestamp") or "")
-                    if stamp is not None and stamp < since:
+                    value = item.get("parsed_timestamp") or item.get("timestamp") or ""
+                    stamp = _parse_time(value)
+                    if stamp is None:
+                        # Bazarr formats its local database time with strftime("%x %X").
+                        stamp = datetime.strptime(value, "%x %X").astimezone()
+                    if stamp < since:
                         items = []
                         break
                     if item.get("subtitles_path"):

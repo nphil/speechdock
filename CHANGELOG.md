@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Interpret Bazarr history dates in their local format, so the scheduled subtitle check does not repeatedly requeue old downloads. If a date cannot be read, retain the checkpoint and report the source error instead of skipping changes.
+
 ## 0.6.0 — 2026-11-22
 
 - Subtitle tidy-up. A `tidy` job brings one video's English subtitles into the standard layout: `<video>.en.srt` for films and TV; for anime also `<video>.en.cc.srt` matched to the English dub by the dub caption ledger's measurement, both complete with the signs-and-songs lines merged in as collapsed `{\an8}` cues. Sources: existing sidecar, embedded English text track (extracted), picture signs by OCR (Tesseract + pgsrip, now in the image), else Bazarr. Anime with English audio and no measurement gets a dub caption job first. Nothing is deleted: other languages, duplicates and replaced files move to `subtitle-quarantine/<job id>/`, and `POST /api/subtitles/undo/<job id>` reverses a job. Plex rescans only the changed folder. Queued by hand (`POST /api/subtitles/tidy`, `/tidy/batch`) or by the scheduled look.

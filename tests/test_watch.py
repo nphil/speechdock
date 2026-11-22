@@ -110,6 +110,55 @@ async def test_the_next_look_asks_only_for_changes_since_the_last_one(library, m
     assert asked["date"] == earlier.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+async def test_bazarr_local_dates_do_not_requeue_older_subtitles(library, monkeypatch):
+    now = datetime.now().astimezone()
+    path = "/tv/Show/Season 1/Show - S01E01.en.srt"
+    rows = [
+        {"subtitles_path": path, "parsed_timestamp": (now - timedelta(minutes=10)).strftime("%x %X")},
+        {"subtitles_path": "/tv/old.en.srt", "parsed_timestamp": (now - timedelta(days=3)).strftime("%x %X")},
+    ]
+    serve(monkeypatch, {
+        **ROUTES,
+        ("sonarr", "/api/v3/history/since"): [],
+        ("radarr", "/api/v3/history/since"): [],
+        ("bazarr", "/api/episodes/history"): {"data": rows, "total": len(rows)},
+    })
+    queued = []
+
+    async def submit(path, anime):
+        queued.append(path)
+        return True
+
+    store = FakeStore()
+    store.settings["tidy_checkpoints"] = {"bazarr": (now - timedelta(hours=1)).isoformat()}
+    watcher = watch.Watcher(store, FakeNotifier(), submit)
+    first = await watcher.look()
+    second = await watcher.look()
+    assert queued == [str(library["tv"] / "Show/Season 1/Show - S01E01.mkv")]
+    assert first["queued"] == 1 and first["not_found"] == 0
+    assert second["changed"] == 0 and second["failed"] == {}
+
+
+async def test_unparseable_bazarr_timestamp_does_not_advance_checkpoint(library, monkeypatch):
+    serve(monkeypatch, {
+        **ROUTES,
+        ("bazarr", "/api/episodes/history"): {
+            "data": [{"subtitles_path": "/tv/missing.en.srt", "parsed_timestamp": "not a timestamp"}],
+            "total": 1,
+        },
+    })
+
+    async def submit(path, anime):
+        return True
+
+    store = FakeStore()
+    previous = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    store.settings["tidy_checkpoints"] = {"bazarr": previous}
+    result = await watch.Watcher(store, FakeNotifier(), submit).look()
+    assert result["failed"]["bazarr"] == "ValueError"
+    assert store.settings["tidy_checkpoints"]["bazarr"] == previous
+
+
 async def test_without_the_anime_list_nothing_is_queued_and_no_checkpoint_moves(library, monkeypatch):
     serve(monkeypatch, {**ROUTES, ("sonarr", "/api/v3/series"): httpx.ConnectError("down")})
     queued = []
