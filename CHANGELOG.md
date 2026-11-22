@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.3 — 2026-11-22
 
 - Picture-only English dialogue (Blu-ray PGS) is now read by OCR during a tidy-up. For an anime with an English dub, the dub caption job (forced, so an earlier result is not reused) scores the OCR'd text against the dub audio first: below 0.75 it becomes `<video>.en.srt` with signs merged, at or above it can serve as `<video>.en.cc.srt`, and an unmeasured OCR text is never filed. Films and other shows use it as `<video>.en.srt` directly.
 
