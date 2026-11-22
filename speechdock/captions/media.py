@@ -88,20 +88,21 @@ async def _run(command: list[str], watch: Callable[[], Awaitable[None]] | None =
 
 
 async def probe(path: Path, timeout: float = 180) -> dict:
-    """ffprobe summary: ``{"streams": [...], "duration": seconds | None}``."""
+    """ffprobe summary: ``{"streams": [...], "duration": seconds | None, "start_time": seconds | None}``."""
     # Warning level, not error: an audio format FFmpeg cannot open (e.g. xHE-AAC) exits 1 and only
     # explains itself with a warning-level line.
     code, out, err = await _run([
         "ffprobe", "-v", "warning", "-show_entries",
         "stream=index,codec_type,codec_name,channels,width,height:stream_tags=language,title"
         ":stream_disposition=default,forced,comment,hearing_impaired,visual_impaired,descriptions,dub,original"
-        ":format=duration", "-of", "json", str(path)], timeout=timeout)
+        ":format=duration,start_time", "-of", "json", str(path)], timeout=timeout)
     if code:
         raise MediaError(tool_failure("Could not read the video", "ffprobe", code, err))
     try:
         data = json.loads(out)
         duration = float(data.get("format", {}).get("duration", 0)) or None
-        return {"streams": list(data.get("streams", [])), "duration": duration}
+        start = data.get("format", {}).get("start_time")
+        return {"streams": list(data.get("streams", [])), "duration": duration, "start_time": float(start) if start is not None else None}
     except (ValueError, TypeError) as exc:
         raise MediaError("Could not read the video's stream list") from exc
 
@@ -202,3 +203,31 @@ async def extract(video: Path, audio: dict, tracks: list[dict], workdir: Path, d
         if path.is_file() and path.stat().st_size:
             files[track["index"]] = path
     return pcm, files, note
+
+
+async def extract_clip(video: Path, audio: dict, tracks: list[dict], workdir: Path, start: float,
+                       seconds: float) -> tuple[Path, dict[int, Path]]:
+    """``seconds`` of the English audio from ``start`` plus each text track's cues in that span, read by
+    seeking, so only that part of the file is read.
+
+    Timestamps are copied (``-copyts``) and every output ends at the clip's end (``-to``). Without the
+    first, ffmpeg moves subtitle times to start at the first cue it reads; with only an input ``-t``,
+    the subtitle outputs run on to the end of the file. Cue times then equal a whole-file read's for a
+    file whose timeline starts at zero, which the caller checks.
+    """
+    workdir.mkdir(parents=True, exist_ok=True)
+    pcm, end = workdir / "clip.pcm", f"{start + seconds:.3f}"
+    command = ["ffmpeg", "-nostdin", "-v", "warning", "-y", "-copyts", "-ss", f"{start:.3f}", "-i", str(video),
+               "-map", f"0:{audio['index']}", "-vn", "-ac", "1", "-ar", str(RATE), "-to", end, "-f", "s16le", str(pcm)]
+    for track in tracks:
+        kind = TEXT_CODECS[track["codec_name"]]
+        command += ["-map", f"0:{track['index']}", "-vn", "-an", "-to", end, "-f", kind, str(workdir / f"clip{track['index']}.{kind}")]
+    code, _, err = await _run(command, timeout=600)
+    if code:
+        raise MediaError(tool_failure("Could not read a clip of the video", "ffmpeg", code, err))
+    files = {}
+    for track in tracks:
+        path = workdir / f"clip{track['index']}.{TEXT_CODECS[track['codec_name']]}"
+        if path.is_file() and path.stat().st_size:
+            files[track["index"]] = path
+    return pcm, files

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ..audio import RATE, render
 from ..engine import Word
-from . import agreement, media, names, windows
+from . import agreement, media, names, quick, windows
 from . import cues as cue_tools
 from .ledger import Ledger, digest, publish, sidecar_for
 from .subtitles import parse_subtitle
@@ -33,6 +33,18 @@ class CaptionError(ValueError):
 def _track_label(track: dict) -> str:
     title = media.tag(track, "title")
     return f"embedded track {track['index']}" + (f" \u201c{title}\u201d" if title else "")
+
+
+def _embedded_meta(track: dict) -> dict:
+    return {"source": "embedded", "stream": track["index"], "title": media.tag(track, "title"),
+            "codec": track["codec_name"], "label": _track_label(track)}
+
+
+def _sidecar_sources(paths: list[Path], ledger: Ledger) -> list[dict]:
+    """English subtitle files beside the video, except SpeechDock's own: derived from a transcript, they prove nothing."""
+    return [{"meta": {"source": "sidecar", "file": path.name, "label": f"file {path.name}"},
+             "cues": parse_subtitle(path.read_bytes(), path.suffix.lstrip("."))}
+            for path in paths if not ledger.is_owned(path)]
 
 
 def analyse(words: list[Word], sources: list[dict]) -> dict:
@@ -113,10 +125,25 @@ async def run_caption_job(*, job: dict, progress, engine, ledger: Ledger, workdi
                        "default": bool((audio.get("disposition") or {}).get("default")), "duration_seconds": duration}
 
     tracks = media.english_text_tracks(probed["streams"])
+    sidecars = _sidecar_sources(await asyncio.to_thread(media.sidecar_subtitles, video), ledger)
     work = workdir / job["id"]
     work.mkdir(parents=True, exist_ok=True)
     sources: list[dict] = []
     try:
+        if quick.applies(duration, probed.get("start_time"), tracks, sidecars):
+            async def clipping(fraction: float) -> None:
+                await progress(0.02 * fraction, duration)
+
+            checked = await quick.check(video=video, audio=audio, tracks=tracks, duration=duration, engine=engine,
+                                        sources=[{"meta": _embedded_meta(track), "cues": []} for track in tracks] + sidecars,
+                                        model=job["model"], workdir=work / "quick", progress=clipping)
+            lap("quick")
+            result["quick"] = checked["report"]
+            if checked["matched"]:
+                result.update(candidates=checked["candidates"], matched=checked["matched"], transcript=checked["transcript"],
+                              note=f"Decided from {quick.NEEDED} clips of {quick.CLIP_SECONDS:.0f} seconds each; "
+                                   "the rest of the file was not read.")
+                return finish("matched_existing", None, duration)
         await progress(0.02, duration)
 
         async def extracting(fraction: float) -> None:
@@ -132,9 +159,7 @@ async def run_caption_job(*, job: dict, progress, engine, ledger: Ledger, workdi
         by_index = {track["index"]: track for track in tracks}
         for index, path in files.items():
             track = by_index[index]
-            cues = parse_subtitle(path.read_bytes(), track["codec_name"])
-            sources.append({"meta": {"source": "embedded", "stream": index, "title": media.tag(track, "title"),
-                                     "codec": track["codec_name"], "label": _track_label(track)}, "cues": cues})
+            sources.append({"meta": _embedded_meta(track), "cues": parse_subtitle(path.read_bytes(), track["codec_name"])})
         lap("extract")
         duration = pcm.stat().st_size / (RATE * 2)
         bounds = await asyncio.to_thread(windows.window_bounds, pcm)
@@ -151,12 +176,7 @@ async def run_caption_job(*, job: dict, progress, engine, ledger: Ledger, workdi
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
-    for path in await asyncio.to_thread(media.sidecar_subtitles, video):
-        if ledger.is_owned(path):
-            continue  # our own earlier output is derived from the transcript: it proves nothing
-        sources.append({"meta": {"source": "sidecar", "file": path.name, "label": f"file {path.name}"},
-                        "cues": parse_subtitle(path.read_bytes(), path.suffix.lstrip("."))})
-
+    sources.extend(sidecars)
     found = await asyncio.to_thread(analyse, words, sources)
     lap("analyse")
     result["candidates"] = found["candidates"]

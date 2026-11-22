@@ -164,9 +164,10 @@ async def test_probe_error_keeps_only_the_last_300_characters(tmp_path, monkeypa
 
 async def test_probe_returns_streams_and_duration_and_passes_the_timeout(tmp_path, monkeypatch):
     fake_tool(tmp_path, monkeypatch, "ffprobe",
-              'echo \'{"streams": [{"index": 0, "codec_type": "audio"}], "format": {"duration": "12.5"}}\'\necho harmless warning >&2')
+              'echo \'{"streams": [{"index": 0, "codec_type": "audio"}], "format": {"duration": "12.5", "start_time": "0.007"}}\'\n'
+              'echo harmless warning >&2')
     result = await media.probe(tmp_path / "x.mkv", timeout=30)
-    assert result == {"streams": [{"index": 0, "codec_type": "audio"}], "duration": 12.5}
+    assert result == {"streams": [{"index": 0, "codec_type": "audio"}], "duration": 12.5, "start_time": 0.007}
 
 
 async def test_extract_error_carries_the_exit_code_and_stderr(tmp_path, monkeypatch):
