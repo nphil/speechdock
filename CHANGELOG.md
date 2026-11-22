@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Keep subtitle tidy-up jobs out of the eight-slot audio-upload limit, so a large library backlog cannot block Bazarr and other transcription requests.
+
 ## 0.6.1 — 2026-11-22
 
 - Interpret Bazarr history dates in their local format, so the scheduled subtitle check does not repeatedly requeue old downloads. If a date cannot be read, retain the checkpoint and report the source error instead of skipping changes.

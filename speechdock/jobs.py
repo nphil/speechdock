@@ -134,8 +134,8 @@ class JobManager:
         return {"waiting": rows.get("queued", 0), "running": rows.get("running", 0) + rows.get("cancelling", 0)}
 
     def _waiting_uploads(self) -> int:
-        """Queued Bazarr/UI requests; caption batches and import-gate jobs never count against their limit."""
-        return self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task NOT IN ('captions','inspect','prune')").fetchone()[0]
+        """Queued audio uploads; path-based library and import-gate jobs have separate limits."""
+        return self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task IN ('transcribe','translate','detect')").fetchone()[0]
 
     async def submit(self, upload, *, source: str, filename: str, task: str, language: str, model: str, encode: bool = True) -> dict:
         async with self._lock:

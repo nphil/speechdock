@@ -69,6 +69,17 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.delete(first["id"])
         self.assertIsNone(self.store.get_job(first["id"]))
 
+    async def test_queued_tidy_jobs_do_not_block_or_delay_audio_uploads(self):
+        active = await self.submit()
+        await self.started.wait()
+        for number in range(9):
+            await self.manager.submit_tidy(source="schedule", path=f"/tv/example-{number}.mkv", anime=False)
+        audio = await self.submit()
+        self.release.set()
+        self.assertEqual((await self.manager.wait(active["id"]))["status"], "completed")
+        self.assertEqual((await self.manager.wait(audio["id"]))["status"], "completed")
+        self.assertEqual([call[0] for call in self.calls[:2]], [active["id"], audio["id"]])
+
     async def test_upload_limit_removes_partial_file(self):
         self.store.update_settings({"max_upload_mb": 1})
         with self.assertRaises(UploadTooLarge):
