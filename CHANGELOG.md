@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2 — 2026-11-22
 
 - Keep subtitle tidy-up jobs out of the eight-slot audio-upload limit, so a large library backlog cannot block Bazarr and other transcription requests.
 
