@@ -70,11 +70,12 @@ async def run_tidy_job(app: FastAPI, job: dict, progress, data_dir: Path) -> dic
     record = app.state.ledger.get(str(video))
     report = await asyncio.to_thread(tidy.tidy, video, anime=anime, record=record,
                                      quarantine=data_dir / "subtitle-quarantine" / job["id"])
-    if "speechdock" in report["pending"] and not request.get("after_captions"):
-        # No dub measurement yet: measure (or write) the dub caption, then tidy this video again behind it.
+    if {"speechdock", "speechdock-ocr"} & set(report["pending"]) and not request.get("after_captions"):
+        # No dub measurement yet (or none of the OCR'd text): measure (or write) the dub caption, then tidy this
+        # video again behind it. Forced so a reused earlier result cannot skip scoring the new OCR text.
         jobs = app.state.jobs
         model = app.state.store.get_settings()["transcription_model"]
-        await jobs.submit_captions(source="tidy", path=str(video), force=False, model=model)
+        await jobs.submit_captions(source="tidy", path=str(video), force="speechdock-ocr" in report["pending"], model=model)
         await jobs.submit_tidy(source="tidy", path=str(video), anime=anime, after_captions=True)
         report["notes"].append("Queued a dub caption job and a second tidy-up after it.")
     if report["written"] or report["renamed"] or report["quarantined"]:

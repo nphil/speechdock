@@ -364,6 +364,11 @@ def ocr_clean(cues: list[Cue]) -> list[Cue]:
     return kept
 
 
+def ocr_dialogue(path: Path) -> list[Cue]:
+    """An OCR'd picture dialogue track from the cache, symbol-only lines dropped."""
+    return ocr_clean(parse_srt(path.read_text(errors="replace")))
+
+
 def _rank(track: Track) -> tuple:
     return (bool(HINT_TITLE.search(track.title)), not FULL_TITLE.search(track.title), track.index)
 
@@ -376,7 +381,7 @@ def decide(video: Path, info: dict, sides: list[Side], *, anime: bool, record: d
     rec = record_valid(video, record)
     if rec:
         for cand in (rec.get("details") or {}).get("candidates") or []:
-            if cand.get("source") == "embedded":
+            if cand.get("source") in ("embedded", "ocr"):
                 for t in tracks:
                     if t.index == cand.get("stream"):
                         t.agreement = cand.get("agreement")
@@ -412,6 +417,7 @@ def decide(video: Path, info: dict, sides: list[Side], *, anime: bool, record: d
         cc = next((s for s in english if s.path == target_dub), None)
         dub_side = next((s for s in english if s.path != target_dub and is_dub(s)), None)
         dub_track = next((t for t in sorted(dialogue_text, key=lambda t: -(t.agreement or 0)) if is_dub(t)), None)
+        dub_picture = next((t for t in dialogue_picture if is_dub(t) and ocr_cache(video, t.index).exists()), None)
         if cc and is_dub(cc) is not False:
             plan.dub = {"sidecar": str(cc.path)}
             taken.add(cc.path)
@@ -420,6 +426,8 @@ def decide(video: Path, info: dict, sides: list[Side], *, anime: bool, record: d
             taken.add(dub_side.path)
         elif dub_track:
             plan.dub = {"stream": dub_track.index, "codec": dub_track.codec}
+        elif dub_picture:
+            plan.dub = {"ocr": str(ocr_cache(video, dub_picture.index)), "ocr_stream": dub_picture.index}
         elif rec is None:
             plan.pending.append("speechdock")  # no measurement yet: SpeechDock writes or finds the dub caption
         else:
@@ -451,11 +459,26 @@ def decide(video: Path, info: dict, sides: list[Side], *, anime: bool, record: d
         und = [t for t in dialogue_text if t.lang == ""]
         if und:
             plan.orig = {"stream": und[0].index, "codec": und[0].codec, "check_english": True}
-        elif [t for t in dialogue_picture if t.lang == "en"]:
-            plan.pending.append("ocr-dialogue")
-            plan.pending.append("bazarr")
         else:
-            plan.pending.append("bazarr")
+            # Picture-only English dialogue: OCR it; for an anime with an English dub, SpeechDock must first
+            # measure the OCR'd text against the dub audio, so a dub script never becomes the translation.
+            for t in sorted((t for t in dialogue_picture if t.lang == "en"), key=_rank):
+                cache = ocr_cache(video, t.index)
+                if not cache.exists():
+                    plan.ocr.append(t.index)  # all of them now: tidy() decides again once they are read
+                    plan.pending.append("ocr-dialogue")
+                    continue
+                if is_dub(t) or not coverage_ok(ocr_dialogue(cache), duration):
+                    continue
+                if plan.ocr:
+                    break  # an earlier-ranked track is still being read
+                if anime and plan.english_audio and t.agreement is None:
+                    plan.pending.append("speechdock-ocr")
+                else:
+                    plan.orig = {"ocr": str(cache), "ocr_stream": t.index}
+                break
+            if plan.orig is None:
+                plan.pending.append("bazarr")
 
     # ---- signs (anime only): a signs track, else the sign events inside a styled dialogue track
     if anime:
@@ -579,7 +602,7 @@ def apply_plan(plan: Plan, journal: Journal) -> dict:
         if "sidecar" in item:
             path = Path(item["sidecar"])
             return parse_file(path.read_bytes(), "ass" if path.suffix.lower() in (".ass", ".ssa") else "srt")
-        cues = streams.get(item["stream"], [])
+        cues = ocr_dialogue(Path(item["ocr"])) if "ocr" in item else streams.get(item["stream"], [])
         if item.get("check_english") and english_ratio(cues) < ENGLISH_RATIO:
             return None
         return cues if coverage_ok(cues, plan.duration) else None
@@ -615,7 +638,7 @@ def apply_plan(plan: Plan, journal: Journal) -> dict:
         if target.exists() and target.read_bytes() == data:
             continue
         reason = (f"converted from {Path(item['sidecar']).name}" if converting else "signs merged" if "sidecar" in item
-                  else f"extracted from stream {item['stream']}")
+                  else f"OCR of picture stream {item['ocr_stream']}" if "ocr" in item else f"extracted from stream {item['stream']}")
         journal.write(target, data, reason)
         outcome["written"].append(str(target))
     for path, reason in plan.quarantine:

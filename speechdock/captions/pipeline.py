@@ -15,6 +15,7 @@ import time
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from .. import tidy
 from ..audio import RATE, render
 from ..engine import Word
 from . import agreement, media, names, windows
@@ -156,6 +157,14 @@ async def run_caption_job(*, job: dict, progress, engine, ledger: Ledger, workdi
             continue  # our own earlier output is derived from the transcript: it proves nothing
         sources.append({"meta": {"source": "sidecar", "file": path.name, "label": f"file {path.name}"},
                         "cues": parse_subtitle(path.read_bytes(), path.suffix.lstrip("."))})
+    for track in probed["streams"]:
+        # A picture track the tidy-up already OCR'd: measured too, so it is filed as dub or translation.
+        if track.get("codec_type") == "subtitle" and track.get("codec_name") in tidy.PICTURE_CODECS and media.is_english(track):
+            cache = tidy.ocr_cache(video, track["index"])
+            if cache.exists():
+                sources.append({"meta": {"source": "ocr", "stream": track["index"], "title": media.tag(track, "title"),
+                                         "label": f"OCR of embedded track {track['index']}"},
+                                "cues": parse_subtitle(cache.read_bytes(), "srt")})
 
     found = await asyncio.to_thread(analyse, words, sources)
     lap("analyse")

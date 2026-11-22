@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from speechdock import tidy
 from speechdock.audio import parse_srt
+from speechdock.captions import media
 from speechdock.captions import CaptionError, Ledger, run_caption_job
 from speechdock.captions.ledger import digest, publish, sidecar_for
 from speechdock.engine import Word
@@ -160,6 +162,24 @@ async def test_a_file_without_english_audio_is_skipped_without_transcribing(libr
     video = make_video(library.root / "Show" / "Ep 6.mkv", audio=(("jpn", 1, {}),))
     report, _, engine = await run(library, "Ep 6.mkv")
     assert report["outcome"] == "no_english_audio" and engine.calls == 0 and not sidecar_for(video).exists()
+
+
+async def test_ocr_text_of_a_picture_track_is_measured_against_the_dub(library, monkeypatch):
+    video = make_video(library.root / "Show" / "Ep 12.mkv")
+    monkeypatch.setattr(tidy, "OCR_DIR", library.root.parent / "ocr")
+    real = media.probe
+
+    async def probe(path, timeout=180):  # ffmpeg cannot write a picture subtitle track, so one is added to the report
+        found = await real(path, timeout)
+        return {**found, "streams": [*found["streams"], {"index": 9, "codec_type": "subtitle",
+                                                         "codec_name": "hdmv_pgs_subtitle", "tags": {"language": "eng"}}]}
+    monkeypatch.setattr(media, "probe", probe)
+    cache = tidy.ocr_cache(video, 9)
+    cache.parent.mkdir(parents=True)
+    cache.write_text(srt(SENTENCES))
+    report, *_ = await run(library, "Ep 12.mkv")
+    assert report["outcome"] == "matched_existing" and not sidecar_for(video).exists()
+    assert report["matched"]["source"] == "ocr" and report["matched"]["stream"] == 9
 
 
 async def test_music_only_audio_is_a_skip_not_a_caption(library):

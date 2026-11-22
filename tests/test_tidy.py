@@ -157,3 +157,29 @@ def test_a_film_with_only_a_dub_caption_keeps_it_and_waits_for_bazarr(lib, tmp_p
     report = run(video, tmp_path, record=record(video, [{"source": "embedded", "stream": 2, "agreement": 0.95}]))
     assert report["orig"] is None and "bazarr" in report["pending"]
     assert sorted(p.name for p in video.parent.iterdir()) == ["Film (2001).en.cc.srt", "Film (2001).mkv"]
+
+
+PICTURE_ONLY = {"format": {"duration": DUR}, "streams": [
+    {"index": 1, "codec_type": "audio", "tags": {"language": "jpn"}},
+    {"index": 2, "codec_type": "audio", "tags": {"language": "eng"}},
+    {"index": 3, "codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle", "tags": {"language": "eng"}}]}
+
+
+def test_picture_only_dialogue_is_read_measured_and_filed_as_translation_or_dub(lib, tmp_path, monkeypatch):
+    monkeypatch.setattr(sn, "OCR_DIR", tmp_path / "ocr")
+    video = lib / "Anime" / "Anime - S01E09.mkv"  # ffmpeg cannot write picture subtitles; the probe report is given
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"x")
+    first = sn.decide(video, PICTURE_ONLY, [], anime=True, record=None)
+    assert first.ocr == [3] and first.orig is None and "ocr-dialogue" in first.pending
+    cache = sn.ocr_cache(video, 3)
+    cache.parent.mkdir(parents=True)
+    cache.write_text(srt(TRANSLATION))
+    unmeasured = sn.decide(video, PICTURE_ONLY, [], anime=True, record=record(video, []))
+    assert unmeasured.orig is None and "speechdock-ocr" in unmeasured.pending  # never filed before the dub is compared
+    measured = sn.decide(video, PICTURE_ONLY, [], anime=True, record=record(video, [{"source": "ocr", "stream": 3, "agreement": 0.41}]))
+    report = sn.apply_plan(measured, sn.Journal(tmp_path / "quarantine"))
+    target = video.with_name("Anime - S01E09.en.srt")
+    assert report["written"] == [str(target)] and "translated 7 words here" in target.read_text()
+    dub = sn.decide(video, PICTURE_ONLY, [], anime=True, record=record(video, [{"source": "ocr", "stream": 3, "agreement": 0.93}]))
+    assert dub.orig is None and dub.dub == {"ocr": str(cache), "ocr_stream": 3} and "bazarr" in dub.pending
