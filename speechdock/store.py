@@ -23,6 +23,7 @@ DEFAULT_SETTINGS = {
     "retention_days": 14,
     "default_language": "auto",
     "auto_captions": False,
+    "auto_tidy": False,
 }
 
 
@@ -77,7 +78,7 @@ class Store:
         if job["task"] == "captions":
             # The report lives in result_json; there is downloadable text only when captions were produced.
             job["result_available"] = job["status"] == "completed" and job["result_text"] is not None
-        if job["task"] in ("inspect", "prune"):
+        if job["task"] in ("inspect", "prune", "tidy"):
             job["result_available"] = False  # the report is structured; there is nothing to download
         if internal:
             job["encode"] = bool(job["encode"])
@@ -101,6 +102,10 @@ class Store:
                     job["inspection"] = report
                 if job["task"] == "prune":
                     job["prune"] = report if detail else ({"outcome": report.get("outcome")} if report else None)
+            if job["task"] == "tidy":
+                report = json.loads(result_json) if result_json else None
+                keys = ("written", "renamed", "quarantined", "pending", "errors")
+                job["tidy"] = report if detail else ({key: report.get(key) for key in keys} if report else None)
         if not detail:
             job.pop("result_text")
         return job

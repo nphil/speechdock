@@ -55,8 +55,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     SPDOCK_ALIGNMENT_MODEL_DIR=/opt/speechdock/models/alignment \
     PATH=/app/.venv/bin:$PATH
 COPY --from=ffmpeg /opt/ffmpeg /opt/ffmpeg
+# mkvtoolnix: audio pruning and picture-subtitle extraction. Tesseract + pgsrip (in its own venv, pinned): OCR of picture
+# (PGS) signs-and-songs tracks for the subtitle tidy-up; libgl1/libglib2.0-0 are what pgsrip's OpenCV needs.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates mkvtoolnix \
+        tesseract-ocr tesseract-ocr-eng libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/* \
+    && python -m venv /opt/pgsrip && /opt/pgsrip/bin/pip install --no-cache-dir pgsrip==0.3.0 \
+    && ln -s /opt/pgsrip/bin/pgsrip /usr/local/bin/pgsrip \
     && ln -s /opt/ffmpeg/bin/ffmpeg /opt/ffmpeg/bin/ffprobe /usr/local/bin/ \
     && mkdir -p /app /data /models-owned /llama-config /etc/llama-swap \
     && ln -s /llama-config /etc/llama-swap/config \

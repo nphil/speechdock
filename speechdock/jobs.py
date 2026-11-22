@@ -29,16 +29,17 @@ class JobConflict(ValueError):
 
 MAX_CAPTION_QUEUE = 5000
 MAX_INSPECT_QUEUE = 200  # inspections and prunings each
-PATH_TASKS = ("captions", "inspect", "prune")  # jobs whose input is a path in a mount, not a spooled upload
+PATH_TASKS = ("captions", "inspect", "prune", "tidy")  # jobs whose input is a path in a mount, not a spooled upload
 MAX_RESTARTS = 3  # a job that keeps being cut short by restarts stops being retried
 RESTART_GAVE_UP = f"Processing was interrupted by a restart {MAX_RESTARTS} times and was not retried again"
 
 
 class JobManager:
-    def __init__(self, store: Store, processor, settings_provider=None):
+    def __init__(self, store: Store, processor, settings_provider=None, on_failure=None):
         self.store = store
         self.processor = processor
         self.settings_provider = settings_provider or store.get_settings
+        self.on_failure = on_failure  # async (job, message) for a job that failed (not one that was cancelled)
         self.upload_dir = store.data_dir / "uploads"
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
@@ -210,7 +211,14 @@ class JobManager:
         return await self._submit_path_job("prune", source=source, path=path, model="mkvmerge",
                                            request={"path": path, "keep": keep, "dry_run": dry_run, **({"note": note} if note else {})}, same=None)
 
-    async def _submit_path_job(self, task: str, *, source: str, path: str, model: str, request: dict, same: str | None) -> tuple[dict, bool]:
+    async def submit_tidy(self, *, source: str, path: str, anime: bool | None, after_captions: bool = False) -> tuple[dict, bool]:
+        """Queue a subtitle tidy-up of one video; returns (job, created). A path already queued or running is
+        not queued twice. ``after_captions``: the dub caption job this one waited for has run."""
+        return await self._submit_path_job("tidy", source=source, path=path, model="tidy", same=None, limit=MAX_CAPTION_QUEUE,
+                                           request={"path": path, "anime": anime, "after_captions": after_captions})
+
+    async def _submit_path_job(self, task: str, *, source: str, path: str, model: str, request: dict, same: str | None,
+                               limit: int = MAX_INSPECT_QUEUE) -> tuple[dict, bool]:
         async with self._lock:
             if self._closing:
                 raise JobConflict("The job queue is shutting down")
@@ -223,7 +231,7 @@ class JobManager:
             if existing:
                 return self.store.get_job(existing["id"]), False
             waiting = self.store.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND task=?", (task,)).fetchone()[0]
-            if waiting >= MAX_INSPECT_QUEUE:
+            if waiting >= limit:
                 raise QueueFull(f"The {task} queue is full")
             job_id = str(uuid.uuid4())
             with self.store.db:
@@ -303,7 +311,9 @@ class JobManager:
         while True:
             self._wake.clear()
             async with self._lock:
-                row = self.store.db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY (task='captions'), created_at, rowid LIMIT 1").fetchone()
+                # Library work (dub captions, subtitle tidy-ups) runs after Bazarr requests, inspections and prunings,
+                # in the order it was queued, so a tidy-up queued behind a caption job sees its result.
+                row = self.store.db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY (task IN ('captions','tidy')), created_at, rowid LIMIT 1").fetchone()
                 if row:
                     job_id = row[0]
                     with self.store.db:
@@ -341,7 +351,12 @@ class JobManager:
                 message = re.sub(r"(?:/[\w.~-]+){2,}", "[path]", message)
                 message = re.sub(r"[\x00-\x1f\x7f]", " ", message)[:500] or "Processing failed"
                 with self.store.db:
-                    self.store.db.execute("UPDATE jobs SET status=CASE WHEN status='cancelling' THEN 'cancelled' ELSE 'failed' END,finished_at=?,error=CASE WHEN status='cancelling' THEN NULL ELSE ? END WHERE id=?", (utcnow(), message, job_id))
+                    failed = self.store.db.execute("UPDATE jobs SET status=CASE WHEN status='cancelling' THEN 'cancelled' ELSE 'failed' END,finished_at=?,error=CASE WHEN status='cancelling' THEN NULL ELSE ? END WHERE id=? RETURNING status", (utcnow(), message, job_id)).fetchone()
+                if self.on_failure and failed and failed[0] == "failed":
+                    try:
+                        await self.on_failure(self.store.get_job(job_id, internal=True), message)
+                    except Exception:  # an alert must never take the queue down
+                        pass
             finally:
                 if not keep_upload:
                     self._remove_upload(job_id)

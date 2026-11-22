@@ -209,3 +209,42 @@ class MigrationTests(unittest.TestCase):
             store = Store(Path(folder))
             self.assertEqual(store.get_job("a")["restarts"], 0)
             store.close()
+
+
+class FailureAlertTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.temp.name))
+        self.alerts = []
+        self.release = asyncio.Event()
+
+        async def processor(job, path, progress):
+            if job["request"]["path"].endswith("broken.mkv"):
+                raise RuntimeError("ffprobe failed: invalid EBML")
+            await self.release.wait()
+            await progress(None)
+            return {"result_json": {}}
+
+        async def on_failure(job, message):
+            self.alerts.append((job["task"], job["filename"], message))
+
+        self.manager = JobManager(self.store, processor, on_failure=on_failure)
+        await self.manager.start()
+
+    async def asyncTearDown(self):
+        await self.manager.close()
+        self.store.close()
+        self.temp.cleanup()
+
+    async def test_a_failed_job_raises_an_alert_and_a_cancelled_one_does_not(self):
+        broken, _ = await self.manager.submit_tidy(source="schedule", path="/plex-media/tv/Show/broken.mkv", anime=False)
+        failed = await self.manager.wait(broken["id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(self.alerts, [("tidy", "broken.mkv", "ffprobe failed: invalid EBML")])
+        slow, _ = await self.manager.submit_tidy(source="schedule", path="/plex-media/tv/Show/slow.mkv", anime=False)
+        while self.store.get_job(slow["id"])["status"] != "running":
+            await asyncio.sleep(0.01)
+        await self.manager.cancel(slow["id"])
+        self.release.set()
+        self.assertEqual((await self.manager.wait(slow["id"]))["status"], "cancelled")
+        self.assertEqual(len(self.alerts), 1)

@@ -127,7 +127,7 @@
   {#if job}
     <div class="job-title"><h3>{job.filename}</h3><span class:failed={job.status === 'failed'} class:complete={job.status === 'completed'} class="status">{job.status}</span></div>
     <dl>
-      <div><dt>Task</dt><dd>{job.task === 'captions' ? 'Dub captions' : job.task === 'inspect' ? 'Audio inspection' : job.task === 'prune' ? 'Audio pruning' : job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'}</dd></div>
+      <div><dt>Task</dt><dd>{job.task === 'captions' ? 'Dub captions' : job.task === 'inspect' ? 'Audio inspection' : job.task === 'prune' ? 'Audio pruning' : job.task === 'tidy' ? 'Subtitle tidy-up' : job.task === 'translate' ? 'Translate to English' : job.task === 'detect' ? 'Detect language' : 'Transcribe'}</dd></div>
       <div><dt>Language</dt><dd>{job.language}</dd></div>
       <div><dt>Model</dt><dd>{job.model}</dd></div>
       <div><dt>Source</dt><dd>{job.source}</dd></div>
@@ -184,6 +184,23 @@
               <td>{#if track.detected}{Math.round(track.detected.sample_start)} s + {track.detected.sample_seconds} s{:else}—{/if}</td></tr>
           {/each}</tbody>
         </table></div>
+      </div>
+    {/if}
+    {#if job.task === 'tidy' && job.tidy}
+      {@const t = job.tidy}
+      {@const name = (p: string) => p.split('/').pop()}
+      <div class="result">
+        <h3>Subtitle tidy-up</h3>
+        <dl class="report">
+          {#if t.video}<div class="wide"><dt>Video file</dt><dd class="path">{t.video}</dd></div>{/if}
+          <div><dt>Layout</dt><dd>{t.anime ? 'Anime: original and dub subtitles' : 'One English subtitle'}</dd></div>
+          <div class="wide"><dt>Written</dt><dd>{t.written.length ? t.written.map(name).join(', ') : 'nothing'}</dd></div>
+          {#if t.renamed.length}<div class="wide"><dt>Renamed</dt><dd>{t.renamed.map(([a, b]) => `${name(a)} → ${name(b)}`).join(', ')}</dd></div>{/if}
+          {#if t.quarantined.length}<div class="wide"><dt>Moved to quarantine</dt><dd>{t.quarantined.map(name).join(', ')}</dd></div>{/if}
+          {#if t.pending.length}<div class="wide"><dt>Waiting for</dt><dd>{t.pending.map(p => p === 'bazarr' ? 'Bazarr to find a subtitle' : p === 'speechdock' ? 'the dub caption measurement' : p).join(', ')}</dd></div>{/if}
+          {#if t.errors.length}<div class="wide"><dt>Problems</dt><dd>{t.errors.join('; ')}</dd></div>{/if}
+          {#if t.notes?.length}<div class="wide"><dt>Notes</dt><dd>{t.notes.join(' ')}</dd></div>{/if}
+        </dl>
       </div>
     {/if}
     {#if job.task === 'prune' && job.prune && 'removed' in job.prune}

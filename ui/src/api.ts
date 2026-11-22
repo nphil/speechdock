@@ -1,4 +1,4 @@
-export type Task = 'transcribe' | 'translate' | 'detect' | 'captions' | 'inspect' | 'prune';
+export type Task = 'transcribe' | 'translate' | 'detect' | 'captions' | 'inspect' | 'prune' | 'tidy';
 export type JobStatus = 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 export type CaptionOutcome = 'written' | 'matched_existing' | 'already_generated' | 'no_english_audio' | 'no_speech';
 export interface CaptionCandidate { source: 'embedded' | 'sidecar'; label: string; stream?: number; title?: string; file?: string; codec?: string; cues: number; agreement: number; precision: number; recall: number }
@@ -31,8 +31,10 @@ export interface Job {
   note?: string | null;
   inspection?: Inspection | null;
   prune?: Pruning | { outcome: Pruning['outcome'] } | null;
+  tidy?: Tidy | null;
 }
-export interface Settings { engine_url: string; transcription_model: string; translation_model: string; detection_model: string; inference_timeout_seconds: number; connect_timeout_seconds: number; max_upload_mb: number; retention_days: number; default_language: string; auto_captions: boolean }
+export interface Settings { engine_url: string; transcription_model: string; translation_model: string; detection_model: string; inference_timeout_seconds: number; connect_timeout_seconds: number; max_upload_mb: number; retention_days: number; default_language: string; auto_captions: boolean; auto_tidy: boolean }
+export interface Tidy { video?: string; anime?: boolean; written: string[]; renamed: [string, string][]; quarantined: string[]; pending: string[]; errors: string[]; notes?: string[]; plex_refreshed?: boolean }
 export interface Download { id: string; status: string; received_bytes: number; total_bytes: number | null; progress: number | null; error: string | null }
 export interface Model { id: string; name: string; description: string; model_id: string; filename: string | null; size_bytes: number | null; sha256: string | null; multilingual: boolean; translation_capable: boolean; quality: string | null; speed: string | null; installed: boolean; verified: boolean; registered: boolean; read_only: boolean; download: Download | null; can_register: boolean; warning: string; runtime: string | null; architecture: string | null; format: string | null; source: string; source_host: string | null; source_filename: string | null; language_detection_capable: boolean; requires_language: boolean; checksum_status: string; runtime_ready: boolean; runtime_error: string | null }
 export interface ImportRequest { name: string; source: 'upload' | 'url'; url?: string; expected_sha256?: string; expected_size_bytes?: number; source_filename?: string }

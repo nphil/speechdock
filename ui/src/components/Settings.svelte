@@ -140,6 +140,12 @@
           <p class="muted">In Sonarr or Radarr, add Connect → Webhook with this address, method POST, and the triggers On Import and On Upgrade.</p>
         </div>
       </section>
+      <section class="group" aria-labelledby="tidy-heading">
+        <div class="group-intro"><h2 id="tidy-heading">Subtitle tidy-up</h2><p>Keep every video's English subtitles as plain SRT files beside it: one <code>.en.srt</code>, and for anime also a dub-matched <code>.en.cc.srt</code>, with signs and songs merged in.</p></div>
+        <div class="fields">
+          <label class="toggle"><input type="checkbox" bind:checked={settings.auto_tidy} /><span><strong>Tidy subtitles of new downloads automatically</strong>Every 30 minutes SpeechDock asks Sonarr, Radarr and Bazarr what they imported or subtitled since the last look and tidies only those videos. Nothing is deleted: replaced and unwanted subtitle files move to the quarantine in SpeechDock's data folder.</span></label>
+        </div>
+      </section>
       <div class="save"><button class="primary" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button></div>
     </form>
   {/if}

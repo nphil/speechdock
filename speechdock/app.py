@@ -17,18 +17,21 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import __version__
+from . import __version__, tidy
 from .audio import SpeechDetector, audio_wav_chunks, iter_wav_chunks, normalize_audio, parse_srt, render, speech_wav_chunks
 from .engine import ENGINE_WAIT_SECONDS, Engine, EngineUnavailable, EngineWait, make_wait
 from .jobs import JobConflict, JobManager, JobNotFound, QueueFull, UploadTooLarge
 from .languages import normalize_language
 from .models import ModelError, ModelManager
 from .recovery import Fallback, transcribe_window
-from .store import Store
+from .store import DEFAULT_SETTINGS, Store
 from .alignment import alignment_lifespan, attach_alignment_routes
-from .captions import Ledger, attach_caption_routes, run_caption_job
+from .captions import Ledger, attach_caption_routes, media, run_caption_job
 from .inspect import InspectError, clean_source, parse_detect, resolve_inspect_path, run_inspection
+from .notify import Notifier
 from .prune import PruneError, check_writable_root, parse_keep, run_prune
+from .tidy_service import attach_tidy_routes, job_failed, run_tidy_job
+from .watch import Watcher
 
 DATA_DIR = Path(os.environ.get("SPDOCK_DATA_DIR", "/data"))
 FRONTEND_DIR = Path(os.environ.get("SPDOCK_FRONTEND_DIR", "ui/dist"))
@@ -70,6 +73,7 @@ class SettingsPatch(BaseModel):
     retention_days: int | None = Field(default=None, ge=1, le=3650, strict=True)
     default_language: str | None = None
     auto_captions: bool | None = Field(default=None, strict=True)
+    auto_tidy: bool | None = Field(default=None, strict=True)
 
     @field_validator("engine_url")
     @classmethod
@@ -172,6 +176,8 @@ def make_processor(app: FastAPI, store: Store):
 
         if job["task"] == "prune":
             return await run_prune(job=job, progress=progress)  # mkvmerge and ffmpeg only, no speech engine
+        if job["task"] == "tidy":
+            return await run_tidy_job(app, job, progress, DATA_DIR)  # ffmpeg and OCR only; may queue a caption job
         if job["task"] == "inspect":
             gate_settings = {**settings, "engine_wait_seconds": min(float(settings.get("engine_wait_seconds", ENGINE_WAIT_SECONDS)), INSPECT_WAIT_SECONDS)}
 
@@ -253,14 +259,29 @@ async def lifespan(app: FastAPI):
     app.state.store, app.state.models = store, models
     app.state.ledger = Ledger(store.db)
     shutil.rmtree(DATA_DIR / "captions-work", ignore_errors=True)
+    tidy.LIBRARIES = tuple(media.media_roots().values())
+    app.state.notifier = Notifier()
 
-    jobs = JobManager(store, make_processor(app, store), store.get_settings)
+    async def failed(job: dict | None, message: str) -> None:
+        await job_failed(app, job, message)
+
+    jobs = JobManager(store, make_processor(app, store), store.get_settings, on_failure=failed)
     app.state.jobs = jobs
+
+    async def submit(path: str, anime: bool) -> bool:
+        try:
+            return (await jobs.submit_tidy(source="schedule", path=path, anime=anime))[1]
+        except QueueFull:
+            return False
+
+    app.state.watcher = Watcher(store, app.state.notifier, submit)
     await jobs.start()
+    app.state.watcher.start()
     try:
         async with alignment_lifespan(app):
             yield
     finally:
+        await app.state.watcher.stop()
         await jobs.close()
         await models.close()
         store.close()
@@ -269,6 +290,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SpeechDock", version=__version__, lifespan=lifespan)
 attach_alignment_routes(app)
 attach_caption_routes(app, model_for)
+attach_tidy_routes(app)
 
 
 @app.exception_handler(RequestValidationError)
@@ -351,7 +373,8 @@ async def overview(request: Request):
 
 @app.get("/api/settings")
 async def get_settings(request: Request):
-    return request.app.state.store.get_settings()
+    # Only the editable settings: internal state kept in the same table (the tidy-up's checkpoints) stays out.
+    return {key: value for key, value in request.app.state.store.get_settings().items() if key in DEFAULT_SETTINGS}
 
 
 @app.patch("/api/settings")

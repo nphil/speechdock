@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 — 2026-11-22
+
+- Subtitle tidy-up. A `tidy` job brings one video's English subtitles into the standard layout: `<video>.en.srt` for films and TV; for anime also `<video>.en.cc.srt` matched to the English dub by the dub caption ledger's measurement, both complete with the signs-and-songs lines merged in as collapsed `{\an8}` cues. Sources: existing sidecar, embedded English text track (extracted), picture signs by OCR (Tesseract + pgsrip, now in the image), else Bazarr. Anime with English audio and no measurement gets a dub caption job first. Nothing is deleted: other languages, duplicates and replaced files move to `subtitle-quarantine/<job id>/`, and `POST /api/subtitles/undo/<job id>` reverses a job. Plex rescans only the changed folder. Queued by hand (`POST /api/subtitles/tidy`, `/tidy/batch`) or by the scheduled look.
+- Scheduled look (Settings: *Tidy subtitles of new downloads automatically*): every 30 minutes, Sonarr/Radarr imports and Bazarr subtitle downloads since the last look are tidied, and nothing else is read. Sources and keys: `SPDOCK_SONARR_URL`/`RADARR`/`BAZARR` with keys in files in the data folder.
+- ntfy alerts for problems: every failed job, a source unreachable for two hours (and its recovery), a tidy-up that finished with errors. One message per problem, repeated at most every six hours with a count. `SPDOCK_NTFY_URL`, `SPDOCK_NTFY_TOPIC`, token in `ntfy-token`.
+- Library work (dub captions and tidy-ups) shares one place in the queue, in order, behind Bazarr requests, inspections and prunings.
+
 ## 0.5.1 — 2026-11-06
 
 - Wait for an on-demand speech model that cannot start yet. The first overnight run of the import gate accepted 12 downloads unheard ("Speech engine returned HTTP 500"): language detection uses Whisper Large-v3, which llama-swap starts only when at least 8 GiB of GPU memory is free, and while a chat model was loaded its launch command exited and llama-swap answered HTTP 500. That 500 (recognised by the launch-command text in its body) is now waited for with growing pauses like 502/503/504; any other 500 still fails at once. `POST /api/inspect` waits at most 12 minutes for it (longer than the 10-minute idle timeout of the big chat models; other jobs keep 15), and a track not listened to because the engine stayed unavailable reports `detection_unavailable: true` next to `detection_error`, so the caller can retry later instead of trusting tags.
