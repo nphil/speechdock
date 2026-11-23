@@ -40,6 +40,7 @@ PICTURE_CODECS = {"hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "dvb_subtitle",
 ENGLISH = {"en", "eng", "english"}
 NO_LANGUAGE = {"", "und", "zxx", "mis", "mul"}
 DUB_AGREEMENT = 0.80  # the dub caption job's threshold (captions/pipeline.py), measured on this library
+DUB_MISMATCH = "dub caption that does not match the dub audio"
 MIN_CUES = 30  # an extracted dialogue track with fewer cues is a signs or forced track
 MIN_COVERAGE = 0.5  # an extracted dialogue track must run past half the video
 ENGLISH_RATIO = 0.2  # share of common English words that marks untagged text as English
@@ -518,8 +519,8 @@ def decide(video: Path, info: dict, sides: list[Side], *, anime: bool, record: d
         if s.path in taken:
             continue
         reason = "duplicate English subtitle"
-        if anime and s.path == target_dub and plan.dub is None:
-            reason = "dub caption that does not match the dub audio"
+        if anime and plan.english_audio and s.path == target_dub and plan.dub is None:
+            reason = DUB_MISMATCH
         plan.quarantine.append((str(s.path), reason))
     for item, target in ((plan.orig, target_orig), (plan.dub, target_dub)):
         if not item or not item.get("sidecar") or item["sidecar"] == str(target):
@@ -654,7 +655,10 @@ def apply_plan(plan: Plan, journal: Journal) -> dict:
         journal.write(target, data, reason)
         outcome["written"].append(str(target))
     for path, reason in plan.quarantine:
-        if Path(path).exists() and Path(path) not in (target_orig, target_dub):
+        # The standard names stay, except an anime's .en.cc.srt measured as not matching the dub: it must go, or
+        # SpeechDock keeps the foreign file and never writes the dub caption.
+        standard = Path(path) in (target_orig, target_dub) and reason != DUB_MISMATCH
+        if Path(path).exists() and not standard:
             journal.stash(Path(path), reason)
             outcome["quarantined"].append(path)
     outcome["pending"] = sorted(set(outcome["pending"]))

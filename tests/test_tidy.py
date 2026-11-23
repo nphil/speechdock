@@ -206,3 +206,18 @@ def test_a_close_translation_below_the_dub_line_is_the_translation_and_a_dub_cap
     report = run(video, tmp_path, anime=True, record=record(video, [{"source": "embedded", "stream": 2, "agreement": 0.77}]))
     assert video.with_name("Anime - S01E04.en.srt").exists() and report["dub"] is None
     assert "speechdock-dub" in report["pending"]
+
+
+def test_a_translation_filed_as_the_dub_caption_under_the_old_line_moves_aside(lib, tmp_path):
+    # Before 0.6.6 a 0.77 translation counted as the dub script and was filed as .en.cc.srt. Re-measured, it must leave
+    # that name: SpeechDock keeps any .en.cc.srt it did not write, so a stale one blocks the real dub caption forever.
+    video = mkv(lib / "Anime" / "Anime - S01E05.mkv", subs=(("English", "srt", srt(TRANSLATION), False),))
+    cc = video.with_name("Anime - S01E05.en.cc.srt")
+    cc.write_text(srt(TRANSLATION))
+    measured = record(video, [{"source": "embedded", "stream": 2, "agreement": 0.77},
+                              {"source": "sidecar", "file": cc.name, "agreement": 0.77,
+                               "sha256": hashlib.sha256(cc.read_bytes()).hexdigest()}])
+    report = run(video, tmp_path, anime=True, record=measured)
+    assert report["errors"] == [] and str(cc) in report["quarantined"] and not cc.exists()
+    assert "translated 3 words here" in video.with_name("Anime - S01E05.en.srt").read_text()
+    assert "speechdock-dub" in report["pending"]

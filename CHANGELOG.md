@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.7 — 2026-11-22
+
+- The tidy-up really moves a `.en.cc.srt` that does not match the dub to the quarantine. 0.6.6 decided to, but a guard that keeps the standard file names in place skipped it, so the dub caption job kept the foreign file and no dub caption was ever written (Jujutsu Kaisen S03E04 and S03E09, among others filed under the old 0.75 line). Only that case changes: other files at the standard names stay where they are.
+
 ## 0.6.6 — 2026-11-22
 
 - The dub threshold is 0.80 (was 0.75). Measured on about 1,700 scored tracks, dub captions score 0.81-0.99 and translations up to 0.79: where a dub keeps close to the subtitles (Jujutsu Kaisen, One-Punch Man, Summer Time Rendering) the translation lands at 0.70-0.79 and was being filed as the dub caption, leaving the episode without its `.en.srt`.
