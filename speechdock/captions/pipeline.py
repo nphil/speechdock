@@ -155,7 +155,7 @@ async def run_caption_job(*, job: dict, progress, engine, ledger: Ledger, workdi
     for path in await asyncio.to_thread(media.sidecar_subtitles, video):
         if ledger.is_owned(path):
             continue  # our own earlier output is derived from the transcript: it proves nothing
-        sources.append({"meta": {"source": "sidecar", "file": path.name, "label": f"file {path.name}"},
+        sources.append({"meta": {"source": "sidecar", "file": path.name, "sha256": digest(path), "label": f"file {path.name}"},
                         "cues": parse_subtitle(path.read_bytes(), path.suffix.lstrip("."))})
     for track in probed["streams"]:
         # A picture track the tidy-up already OCR'd: measured too, so it is filed as dub or translation.

@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 LIBRARIES: tuple[str, ...] = ("/plex-media/tv", "/plex-media/movies")  # replaced by the media mounts at start-up
@@ -328,6 +329,15 @@ def record_valid(video: Path, record: dict | None) -> dict | None:
     return record
 
 
+def measured_as_is(path: Path, cand: dict, record: dict) -> bool:
+    """Whether a sidecar is still the file the ledger scored. Bazarr replaces subtitles under the same name, and a
+    score taken from the earlier file then describes different text (fingerprint; older records: not modified since)."""
+    if cand.get("sha256"):
+        return hashlib.sha256(path.read_bytes()).hexdigest() == cand["sha256"]
+    measured = record.get("updated_at")
+    return not measured or path.stat().st_mtime <= datetime.fromisoformat(measured).timestamp()
+
+
 # ---------------------------------------------------------------------------------------------- decide
 
 
@@ -387,7 +397,7 @@ def decide(video: Path, info: dict, sides: list[Side], *, anime: bool, record: d
                         t.agreement = cand.get("agreement")
             elif cand.get("source") == "sidecar":
                 for s in sides:
-                    if s.path.name == cand.get("file"):
+                    if s.path.name == cand.get("file") and measured_as_is(s.path, cand, rec):
                         s.agreement = cand.get("agreement")
 
     target_orig = video.with_name(video.stem + ".en.srt")

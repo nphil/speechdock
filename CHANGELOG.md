@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A sidecar's dub measurement only counts while the file is the one that was measured. Bazarr replaces subtitles under the same name; an old score then described different text, and a translation could be filed as the dub caption (two Food Wars! episodes in this library). Measurements now record each sidecar's SHA-256; older records count only for files not modified since they were taken.
+
 ## 0.6.3 — 2026-11-22
 
 - Picture-only English dialogue (Blu-ray PGS) is now read by OCR during a tidy-up. For an anime with an English dub, the dub caption job (forced, so an earlier result is not reused) scores the OCR'd text against the dub audio first: below 0.75 it becomes `<video>.en.srt` with signs merged, at or above it can serve as `<video>.en.cc.srt`, and an unmeasured OCR text is never filed. Films and other shows use it as `<video>.en.srt` directly.

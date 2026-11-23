@@ -1,4 +1,5 @@
 """Subtitle tidy-up rules, on real Matroska files made with ffmpeg."""
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -183,3 +184,17 @@ def test_picture_only_dialogue_is_read_measured_and_filed_as_translation_or_dub(
     assert report["written"] == [str(target)] and "translated 7 words here" in target.read_text()
     dub = sn.decide(video, PICTURE_ONLY, [], anime=True, record=record(video, [{"source": "ocr", "stream": 3, "agreement": 0.93}]))
     assert dub.orig is None and dub.dub == {"ocr": str(cache), "ocr_stream": 3} and "bazarr" in dub.pending
+
+
+def test_a_subtitle_replaced_after_it_was_measured_loses_its_old_score(lib):
+    video = mkv(lib / "Anime" / "Anime - S01E03.mkv")
+    side = video.with_name("Anime - S01E03.en.srt")
+    side.write_text(srt(DIALOGUE))
+    measured = record(video, [{"source": "sidecar", "file": side.name, "agreement": 0.95,
+                               "sha256": hashlib.sha256(side.read_bytes()).hexdigest()}])
+    info = sn.probe(video)
+    first = sn.decide(video, info, sn.sidecars(video, [video.stem]), anime=True, record=measured)
+    assert first.orig is None and first.dub == {"sidecar": str(side)}  # the measured dub script is never the translation
+    side.write_text(srt(TRANSLATION))  # Bazarr replaces it under the same name
+    again = sn.decide(video, info, sn.sidecars(video, [video.stem]), anime=True, record=measured)
+    assert again.dub is None and again.orig == {"sidecar": str(side)}  # the old score no longer describes this file
