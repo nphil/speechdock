@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.4 — 2026-11-22
 
 - A sidecar's dub measurement only counts while the file is the one that was measured. Bazarr replaces subtitles under the same name; an old score then described different text, and a translation could be filed as the dub caption (two Food Wars! episodes in this library). Measurements now record each sidecar's SHA-256; older records count only for files not modified since they were taken.
 
