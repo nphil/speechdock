@@ -198,3 +198,11 @@ def test_a_subtitle_replaced_after_it_was_measured_loses_its_old_score(lib):
     side.write_text(srt(TRANSLATION))  # Bazarr replaces it under the same name
     again = sn.decide(video, info, sn.sidecars(video, [video.stem]), anime=True, record=measured)
     assert again.dub is None and again.orig == {"sidecar": str(side)}  # the old score no longer describes this file
+
+
+def test_a_close_translation_below_the_dub_line_is_the_translation_and_a_dub_caption_is_asked_for(lib, tmp_path):
+    # Jujutsu Kaisen's English subtitles measure 0.70-0.79 against its dub because the dub keeps close to them.
+    video = mkv(lib / "Anime" / "Anime - S01E04.mkv", subs=(("English", "srt", srt(TRANSLATION), False),))
+    report = run(video, tmp_path, anime=True, record=record(video, [{"source": "embedded", "stream": 2, "agreement": 0.77}]))
+    assert video.with_name("Anime - S01E04.en.srt").exists() and report["dub"] is None
+    assert "speechdock-dub" in report["pending"]

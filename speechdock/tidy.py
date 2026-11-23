@@ -10,7 +10,7 @@ never has to burn subtitles in.
 Sources, best first: an existing sidecar, an embedded English text track (extracted; video files
 are never changed), then Bazarr (which ends with SpeechDock's Whisper provider). Picture (PGS) signs
 are read by OCR. Which embedded track matches the dub comes from the dub caption ledger (measured
-agreement with the English audio, 0.75 or more), never from track titles.
+agreement with the English audio, 0.80 or more), never from track titles.
 
 Nothing is deleted. A replaced or unwanted file (other languages, duplicates, numbered copies,
 forced-only, an anime track that matches neither audio) moves to the quarantine folder, and every
@@ -39,7 +39,7 @@ TEXT_CODECS = {"subrip": "srt", "srt": "srt", "ass": "ass", "ssa": "ass", "mov_t
 PICTURE_CODECS = {"hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "dvb_subtitle", "vobsub"}
 ENGLISH = {"en", "eng", "english"}
 NO_LANGUAGE = {"", "und", "zxx", "mis", "mul"}
-DUB_AGREEMENT = 0.75  # SpeechDock's threshold: dub captions measure 0.80-0.97, translations at most 0.70
+DUB_AGREEMENT = 0.80  # the dub caption job's threshold (captions/pipeline.py), measured on this library
 MIN_CUES = 30  # an extracted dialogue track with fewer cues is a signs or forced track
 MIN_COVERAGE = 0.5  # an extracted dialogue track must run past half the video
 ENGLISH_RATIO = 0.2  # share of common English words that marks untagged text as English
@@ -441,7 +441,9 @@ def decide(video: Path, info: dict, sides: list[Side], *, anime: bool, record: d
         elif rec is None:
             plan.pending.append("speechdock")  # no measurement yet: SpeechDock writes or finds the dub caption
         else:
-            plan.notes.append("SpeechDock record has no dub caption")
+            # Measured, but nothing matches the dub (now, or under an older threshold): measure again, so SpeechDock
+            # writes its own dub caption once the non-matching file has gone to the quarantine.
+            plan.pending.append("speechdock-dub")
 
     # ---- the original-matched file (every video)
     def orig_ok(item) -> bool:

@@ -23,7 +23,9 @@ from . import cues as cue_tools
 from .ledger import Ledger, digest, publish, sidecar_for
 from .subtitles import parse_subtitle
 
-AGREEMENT_THRESHOLD = 0.75  # measured on this library: dub captions 0.91-0.95, translations 0.31-0.62
+# Measured on this library (22 Nov 2026, 1,700 scored tracks): dub captions 0.81-0.99, mostly above 0.9; translations up to
+# 0.79, where a dub keeps close to the subtitles (Jujutsu Kaisen, One-Punch Man, Summer Time Rendering at 0.70-0.79).
+AGREEMENT_THRESHOLD = 0.80
 MIN_WORDS = 25  # fewer recognized words than this is not a speech track
 
 
@@ -182,7 +184,9 @@ async def run_caption_job(*, job: dict, progress, engine, ledger: Ledger, workdi
 
     exists = os.path.lexists(sidecar)
     if exists and not ledger.is_owned(sidecar):
-        raise CaptionError(f"{sidecar.name} already exists and was not created by SpeechDock, so it was left untouched.")
+        # Not ours, so never replaced; the measurement is still recorded, which tells the tidy-up it is no dub caption.
+        result["note"] = f"{sidecar.name} does not match the dub audio and was not created by SpeechDock, so it was left untouched."
+        return finish("kept_existing", found["srt"], duration)
     data = found["srt"].encode("utf-8")
     try:
         await asyncio.to_thread(publish, sidecar, data, replace=exists)

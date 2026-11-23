@@ -194,9 +194,10 @@ async def test_a_file_that_is_not_ours_is_never_overwritten_even_when_forced(lib
     foreign.write_text("1\n00:00:01,000 --> 00:00:02,000\nsomeone else's captions\n")
     before = foreign.read_bytes()
     for force in (False, True):
-        with pytest.raises(CaptionError, match="not created by SpeechDock"):
-            await run(library, "Ep 8.mkv", force=force)
+        report, *_ = await run(library, "Ep 8.mkv", force=force)
+        assert report["outcome"] == "kept_existing" and "not created by SpeechDock" in report["note"]
         assert foreign.read_bytes() == before
+    assert library.ledger.get(video)["outcome"] == "kept_existing"  # the measurement is kept for the tidy-up
     assert not library.ledger.is_owned(foreign)
 
 
@@ -220,8 +221,8 @@ async def test_a_file_we_wrote_but_a_person_replaced_is_theirs_and_never_overwri
     sidecar.write_text("1\n00:00:01,000 --> 00:00:02,000\nhand written captions\n")
     assert not library.ledger.is_owned(sidecar)
     replaced = sidecar.read_bytes()
-    with pytest.raises(CaptionError, match="not created by SpeechDock"):
-        await run(library, "Ep 10.mkv", force=True)
+    report, *_ = await run(library, "Ep 10.mkv", force=True)
+    assert report["outcome"] == "kept_existing"
     assert sidecar.read_bytes() == replaced
 
 

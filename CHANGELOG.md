@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6 — 2026-11-22
+
+- The dub threshold is 0.80 (was 0.75). Measured on about 1,700 scored tracks, dub captions score 0.81-0.99 and translations up to 0.79: where a dub keeps close to the subtitles (Jujutsu Kaisen, One-Punch Man, Summer Time Rendering) the translation lands at 0.70-0.79 and was being filed as the dub caption, leaving the episode without its `.en.srt`.
+- A `.en.cc.srt` SpeechDock did not write and that does not match the dub no longer fails the dub caption job: the file is still left alone, the job ends as `kept_existing` with its measurement recorded, and the tidy-up moves the file to the quarantine.
+- An anime episode with English audio that has been measured but has no dub caption gets a forced dub caption job and a second tidy-up, so SpeechDock writes the missing `.en.cc.srt`.
+
 ## 0.6.5 — 2026-11-22
 
 - The second tidy-up that follows a dub caption job is queued again. The running tidy-up of the same video counted as a duplicate of its own follow-up, so measured OCR text and new dub captions were never filed until something else tidied the video (36 of 38 picture-subtitle episodes on 22 Nov).
