@@ -80,6 +80,18 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.manager.wait(audio["id"]))["status"], "completed")
         self.assertEqual([call[0] for call in self.calls[:2]], [active["id"], audio["id"]])
 
+    async def test_a_running_tidy_can_queue_its_own_follow_up_but_nothing_else_doubles(self):
+        await self.submit()
+        await self.started.wait()  # the worker is busy, so whatever is queued below stays queued
+        self.plant("running-tidy", "running", task="tidy", payload={"path": "/tv/a.mkv"}, audio=False)
+        follow_up, created = await self.manager.submit_tidy(source="tidy", path="/tv/a.mkv", anime=True, after_captions=True)
+        self.assertTrue(created)
+        _, again = await self.manager.submit_tidy(source="tidy", path="/tv/a.mkv", anime=True, after_captions=True)
+        _, plain = await self.manager.submit_tidy(source="schedule", path="/tv/a.mkv", anime=True)
+        self.assertFalse(again)
+        self.assertFalse(plain)
+        self.release.set()
+
     async def test_upload_limit_removes_partial_file(self):
         self.store.update_settings({"max_upload_mb": 1})
         with self.assertRaises(UploadTooLarge):

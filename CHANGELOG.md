@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.5 — 2026-11-22
+
+- The second tidy-up that follows a dub caption job is queued again. The running tidy-up of the same video counted as a duplicate of its own follow-up, so measured OCR text and new dub captions were never filed until something else tidied the video (36 of 38 picture-subtitle episodes on 22 Nov).
+
 ## 0.6.4 — 2026-11-22
 
 - A sidecar's dub measurement only counts while the file is the one that was measured. Bazarr replaces subtitles under the same name; an old score then described different text, and a translation could be filed as the dub caption (two Food Wars! episodes in this library). Measurements now record each sidecar's SHA-256; older records count only for files not modified since they were taken.

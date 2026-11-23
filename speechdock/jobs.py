@@ -213,16 +213,18 @@ class JobManager:
 
     async def submit_tidy(self, *, source: str, path: str, anime: bool | None, after_captions: bool = False) -> tuple[dict, bool]:
         """Queue a subtitle tidy-up of one video; returns (job, created). A path already queued or running is
-        not queued twice. ``after_captions``: the dub caption job this one waited for has run."""
+        not queued twice. ``after_captions``: the dub caption job this one waited for has run; it is queued by the
+        running tidy-up of the same path, so only a waiting one counts as a duplicate."""
         return await self._submit_path_job("tidy", source=source, path=path, model="tidy", same=None, limit=MAX_CAPTION_QUEUE,
-                                           request={"path": path, "anime": anime, "after_captions": after_captions})
+                                           request={"path": path, "anime": anime, "after_captions": after_captions},
+                                           statuses="'queued'" if after_captions else "'queued','running'")
 
     async def _submit_path_job(self, task: str, *, source: str, path: str, model: str, request: dict, same: str | None,
-                               limit: int = MAX_INSPECT_QUEUE) -> tuple[dict, bool]:
+                               limit: int = MAX_INSPECT_QUEUE, statuses: str = "'queued','running'") -> tuple[dict, bool]:
         async with self._lock:
             if self._closing:
                 raise JobConflict("The job queue is shutting down")
-            query = "SELECT id FROM jobs WHERE task=? AND status IN ('queued','running') AND json_extract(payload,'$.path')=?"
+            query = f"SELECT id FROM jobs WHERE task=? AND status IN ({statuses}) AND json_extract(payload,'$.path')=?"
             args: tuple = (task, path)
             if same:
                 query += f" AND json_extract(payload,'$.{same}')=json_extract(?,'$.{same}')"
