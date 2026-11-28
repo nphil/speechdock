@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.8 — 2026-11-27
+
+- The Unraid template adds SpeechDock to the `users` group (100) so it can read group-readable media without running as root. On existing installs, append `--group-add=100` to Extra Parameters and apply; pulling the image alone does not change the saved template.
+
 ## 0.6.7 — 2026-11-22
 
 - The tidy-up really moves a `.en.cc.srt` that does not match the dub to the quarantine. 0.6.6 decided to, but a guard that keeps the standard file names in place skipped it, so the dub caption job kept the foreign file and no dub caption was ever written (Jujutsu Kaisen S03E04 and S03E09, among others filed under the old 0.75 line). Only that case changes: other files at the standard names stay where they are.

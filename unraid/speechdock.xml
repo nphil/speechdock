@@ -14,7 +14,7 @@
   <WebUI>https://speechdock.nateshome.net/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/nphil/speechdock/main/unraid/speechdock.xml</TemplateURL>
   <Icon>https://speechdock.nateshome.net/icon-512.png</Icon>
-  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <ExtraParams>--restart=unless-stopped --group-add=100</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <Requires>Existing llama-swap service; prepared writable directories and matching llama-swap validator.</Requires>
